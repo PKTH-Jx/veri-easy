@@ -41,7 +41,7 @@ impl Debug for Function {
     }
 }
 
-/// Visitor that collects free functions and impl methods, tracking current impl target.
+/// Visitor that collects free functions and impl methods.
 struct FnCollector {
     funcs: Vec<Function>,
     scope_stack: Vec<String>,
