@@ -35,9 +35,10 @@ impl Source {
 
     /// Mark a function as checked
     pub fn set_checked(&mut self, name: &str) {
-        self.checked_funcs
-            .push(self.unchecked_func(name).unwrap().clone());
-        self.unchecked_funcs.retain(|f| f.name != name);
+        if let Some(func) = self.unchecked_func(name) {
+            self.checked_funcs.push(func.clone());
+            self.unchecked_funcs.retain(|f| f.name != name);
+        }
     }
 
     /// Ignore functions that only appear in one of the sources

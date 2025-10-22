@@ -1,17 +1,39 @@
+use anyhow::Error;
+
 use crate::source::Source;
 
 /// Typed check result
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CheckResult {
+    /// Overall status (e.g., any fatal error that prevented full checking)
+    pub status: anyhow::Result<()>,
+    /// Functions that passed the consistency check
     pub ok: Vec<String>,
+    /// Functions that failed the consistency check
     pub fail: Vec<String>,
-    pub undetermined: Vec<String>,
-    pub note: Option<String>,
+}
+
+impl CheckResult {
+    pub fn failed(e: Error) -> Self {
+        Self {
+            status: Err(e),
+            ok: Vec::new(),
+            fail: Vec::new(),
+        }
+    }
 }
 
 /// A single check step
 pub trait CheckStep {
+    /// Name of the step
     fn name(&self) -> &str;
+
+    /// Additional note to print
+    fn note(&self) -> Option<&str> {
+        None
+    }
+
+    /// Run the check step
     fn run(&self, src1: &Source, src2: &Source) -> CheckResult;
 }
 
@@ -32,10 +54,15 @@ impl Checker {
     /// Run all steps in order
     pub fn run_all(&mut self) -> anyhow::Result<()> {
         for step in &self.steps {
-            let res = step.run(&self.src1, &self.src2);
-            match res.note {
+            println!(""); // empty line to separate steps
+            match step.note() {
                 Some(note) => println!("Step `{}` => {:?}", step.name(), note),
                 None => println!("Step `{}`", step.name()),
+            }
+
+            let res = step.run(&self.src1, &self.src2);
+            if let Err(e) = res.status {
+                println!("Step `{}` failed to execute: {}", step.name(), e);
             }
 
             for func in &res.ok {
@@ -43,6 +70,7 @@ impl Checker {
                 self.src1.set_checked(func);
                 self.src2.set_checked(func);
             }
+            self.print_state();
 
             if !res.fail.is_empty() {
                 return Err(anyhow::anyhow!(
