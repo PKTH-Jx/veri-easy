@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::fmt::Debug;
 use std::fs;
 
-use crate::function::{Function, extract_functions};
+use crate::function::{Function, collect_functions};
 
 /// Represent a Rust source file
 pub struct Source {
@@ -23,7 +23,7 @@ impl Source {
     pub fn new(path: impl Into<String>) -> Result<Self> {
         let path = path.into();
         let content = fs::read_to_string(&path)?;
-        let funcs = extract_functions(&content)?;
+        let funcs = collect_functions(&content)?;
         Ok(Self {
             path,
             content,
@@ -64,7 +64,7 @@ impl Source {
             .retain(|f| src1.unchecked_func(&f.name).is_some());
     }
 
-    /// Find a function by name
+    /// Find an unchecked function by name
     pub fn unchecked_func(&self, name: &str) -> Option<&Function> {
         self.unchecked_funcs.iter().find(|f| f.name == name)
     }

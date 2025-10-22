@@ -2,8 +2,9 @@ use anyhow::Result;
 use prettyplease;
 use std::fmt::Debug;
 use syn::{
-    File, ItemFn, Type,
+    Attribute, File, ImplItemFn, ItemFn, ItemImpl, Type,
     visit::{self, Visit},
+    visit_mut::{self, VisitMut},
 };
 
 /// Function identity + AST payload. Hash/Eq by `name` only.
@@ -43,14 +44,14 @@ impl Debug for Function {
 /// Visitor that collects free functions and impl methods, tracking current impl target.
 struct FnCollector {
     funcs: Vec<Function>,
-    name_stack: Vec<String>,
+    scope_stack: Vec<String>,
 }
 
 impl FnCollector {
     fn new() -> Self {
         Self {
             funcs: Vec::new(),
-            name_stack: Vec::new(),
+            scope_stack: Vec::new(),
         }
     }
     fn into_vec(self) -> Vec<Function> {
@@ -65,23 +66,17 @@ impl<'ast> Visit<'ast> for FnCollector {
         visit::visit_item_fn(self, node);
     }
 
-    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        self.name_stack.push(match &*(node.self_ty) {
-            Type::Path(tp) => tp
-                .path
-                .get_ident()
-                .map_or("unknown".to_owned(), |id| id.to_string()),
-            _ => "unsupported".to_owned(),
-        });
+    fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
+        self.scope_stack.push(type_to_string(&node.self_ty, "::"));
         visit::visit_item_impl(self, node);
-        self.name_stack.pop();
+        self.scope_stack.pop();
     }
 
-    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        let name = self.name_stack.join("::") + "::" + &node.sig.ident.to_string();
+    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        let name = self.scope_stack.join("::") + "::" + &node.sig.ident.to_string();
         self.funcs.push(Function {
             name,
-            item: syn::ItemFn {
+            item: ItemFn {
                 attrs: node.attrs.clone(),
                 vis: node.vis.clone(),
                 sig: node.sig.clone(),
@@ -92,10 +87,73 @@ impl<'ast> Visit<'ast> for FnCollector {
     }
 }
 
-/// Parse a file and extract functions
-pub fn extract_functions(src: &str) -> Result<Vec<Function>> {
+/// Parse a file and collect functions
+pub fn collect_functions(src: &str) -> Result<Vec<Function>> {
     let syntax: File = syn::parse_file(src)?;
     let mut collector = FnCollector::new();
     collector.visit_file(&syntax);
     Ok(collector.into_vec())
+}
+
+/// Visitor that sets `#[export_name = "..."]` on functions and impl methods.
+struct FnExporter {
+    scope_stack: Vec<String>,
+}
+
+impl FnExporter {
+    fn new() -> Self {
+        Self {
+            scope_stack: Vec::new(),
+        }
+    }
+}
+
+impl VisitMut for FnExporter {
+    fn visit_item_fn_mut(&mut self, node: &mut ItemFn) {
+        if node.sig.generics.lt_token.is_none() {
+            let name = node.sig.ident.to_string();
+            let attr: Attribute = syn::parse_quote!(#[export_name = #name]);
+            node.attrs.push(attr);
+        }
+        // skip function with generic params
+        visit_mut::visit_item_fn_mut(self, node);
+    }
+
+    fn visit_item_impl_mut(&mut self, node: &mut ItemImpl) {
+        if node.generics.lt_token.is_none() {
+            self.scope_stack.push(type_to_string(&node.self_ty, "___"));
+            visit_mut::visit_item_impl_mut(self, node);
+            self.scope_stack.pop();
+        }
+        // skip impl block with generic params
+    }
+
+    fn visit_impl_item_fn_mut(&mut self, node: &mut ImplItemFn) {
+        let name = self.scope_stack.join("___") + "___" + &node.sig.ident.to_string();
+        let attr: Attribute = syn::parse_quote!(#[export_name = #name]);
+        node.attrs.push(attr);
+        visit_mut::visit_impl_item_fn_mut(self, node);
+    }
+}
+
+/// Add `#[export_name = "..."]` to all functions and impl methods
+pub fn export_functions(src: &str) -> Result<String> {
+    let mut syntax: File = syn::parse_file(src)?;
+    let mut exporter = FnExporter::new();
+    exporter.visit_file_mut(&mut syntax);
+    Ok(prettyplease::unparse(&syntax))
+}
+
+/// Convert a type to a string
+fn type_to_string(ty: &Type, sep: &str) -> String {
+    match ty {
+        Type::Path(tp) => tp
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join(sep),
+        _ => "unsupported".to_owned(),
+    }
 }
