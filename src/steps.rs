@@ -37,5 +37,3 @@ impl CheckStep for Identical {
         res
     }
 }
-
-// ---------------- Example usage ----------------
