@@ -10,7 +10,7 @@ use syn::{
 /// Function identity + AST payload. Hash/Eq by `name` only.
 #[derive(Clone)]
 pub struct Function {
-    /// Fully-qualified name, e.g. "foo" or "MyType::bar" or "crate::module::MyType::bar"
+    /// Fully-qualified name, e.g. "foo" or "MyType::bar" or "module::MyType::bar"
     pub name: String,
     pub item: ItemFn,
 }
@@ -57,13 +57,26 @@ impl FnCollector {
     fn into_vec(self) -> Vec<Function> {
         self.funcs
     }
+    fn concat_name(&self, name: &str) -> String {
+        if self.scope_stack.is_empty() {
+            name.to_string()
+        } else {
+            self.scope_stack.join("::") + "::" + name
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for FnCollector {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        let name = node.sig.ident.to_string();
+        let name = self.concat_name(&node.sig.ident.to_string());
         self.funcs.push(Function::new(name, node.clone()));
         visit::visit_item_fn(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        self.scope_stack.push(node.ident.to_string());
+        visit::visit_item_mod(self, node);
+        self.scope_stack.pop();
     }
 
     fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
@@ -73,7 +86,7 @@ impl<'ast> Visit<'ast> for FnCollector {
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
-        let name = self.scope_stack.join("::") + "::" + &node.sig.ident.to_string();
+        let name = self.concat_name(&node.sig.ident.to_string());
         self.funcs.push(Function {
             name,
             item: ItemFn {
@@ -106,17 +119,30 @@ impl FnExporter {
             scope_stack: Vec::new(),
         }
     }
+    fn concat_name(&self, name: &str) -> String {
+        if self.scope_stack.is_empty() {
+            name.to_string()
+        } else {
+            self.scope_stack.join("___") + "___" + name
+        }
+    }
 }
 
 impl VisitMut for FnExporter {
     fn visit_item_fn_mut(&mut self, node: &mut ItemFn) {
         if node.sig.generics.lt_token.is_none() {
-            let name = node.sig.ident.to_string();
+            let name = self.concat_name(&node.sig.ident.to_string());
             let attr: Attribute = syn::parse_quote!(#[export_name = #name]);
             node.attrs.push(attr);
         }
         // skip function with generic params
         visit_mut::visit_item_fn_mut(self, node);
+    }
+
+    fn visit_item_mod_mut(&mut self, i: &mut syn::ItemMod) {
+        self.scope_stack.push(i.ident.to_string());
+        visit_mut::visit_item_mod_mut(self, i);
+        self.scope_stack.pop();
     }
 
     fn visit_item_impl_mut(&mut self, node: &mut ItemImpl) {
@@ -129,7 +155,7 @@ impl VisitMut for FnExporter {
     }
 
     fn visit_impl_item_fn_mut(&mut self, node: &mut ImplItemFn) {
-        let name = self.scope_stack.join("___") + "___" + &node.sig.ident.to_string();
+        let name = self.concat_name(&node.sig.ident.to_string());
         let attr: Attribute = syn::parse_quote!(#[export_name = #name]);
         node.attrs.push(attr);
         visit_mut::visit_impl_item_fn_mut(self, node);
