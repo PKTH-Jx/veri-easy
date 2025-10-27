@@ -37,10 +37,17 @@ impl Kani {
                 #content2
             }
         };
-        let harnesses = src1
+        let harness_fn = src1
             .unchecked_funcs
             .iter()
+            .filter(|f| f.impl_type.is_none())
             .map(|f| generate_harness_fn(f))
+            .collect::<Vec<_>>();
+        let harness_method = src1
+            .unchecked_funcs
+            .iter()
+            .filter(|f| f.impl_type.is_some())
+            .map(|f| generate_harness_method(f, f.impl_type.as_ref().unwrap()))
             .collect::<Vec<_>>();
 
         Ok(quote! {
@@ -48,7 +55,9 @@ impl Kani {
 
             #mod2
 
-            #(#harnesses)*
+            #(#harness_fn)*
+
+            #(#harness_method)*
         })
     }
 
@@ -81,16 +90,16 @@ impl Kani {
             fail: vec![],
         };
 
-        let re = Regex::new(r"Check [0-9]+: check___([0-9a-zA-Z_]+)\.").unwrap();
+        let re = Regex::new(r"Checking harness check___([0-9a-zA-Z_]+)\.").unwrap();
         let mut func_name: Option<String> = None;
 
         for line in output.lines() {
             if let Some(caps) = re.captures(line) {
                 func_name = Some(caps[1].replace("___", "::"));
             }
-            if line.contains("Status: SUCCESS") && func_name.is_some() {
+            if line.contains("VERIFICATION:- SUCCESSFUL") && func_name.is_some() {
                 res.ok.push(func_name.take().unwrap());
-            } else if line.contains("Status: FAILED") && func_name.is_some() {
+            } else if line.contains("VERIFICATION:- FAILED") && func_name.is_some() {
                 res.fail.push(func_name.take().unwrap());
             }
         }
@@ -141,19 +150,8 @@ impl CheckStep for Kani {
     }
 }
 
-const ARR_LIMIT: usize = 16;
-trait ArbitraryInit {
-    fn init_for_type(&self, arg_name: &str, mutability: &Option<Mut>) -> TokenStream;
-}
-
-fn error_msg(msg: &str) -> proc_macro2::TokenStream {
-    quote! {
-        compile_error!(#msg);
-    }
-}
-
-/// Automatedly generate Kani harness for comparing two implementations.
-pub fn generate_harness_fn(func: &Function) -> TokenStream {
+/// Automatedly generate one Kani harness for comparing two free-standing functions.
+fn generate_harness_fn(func: &Function) -> TokenStream {
     let harness_name = quote::format_ident!("check___{}", func.name.replace("::", "___"));
     let func_name = TokenStream::from_str(&func.name).unwrap();
     let inputs = &func.item.sig.inputs;
@@ -196,62 +194,89 @@ pub fn generate_harness_fn(func: &Function) -> TokenStream {
     }
 }
 
-// /// Automatedly generate Kani one test harness for target method.
-// pub fn autokani_method(_attr: TokenStream, item: TokenStream) -> TokenStream {
-//     let input = parse_macro_input!(item as Item);
-//     let func = match input {
-//         Item::Fn(func) => func,
-//         _ => {
-//             return error_msg("`kani_test` can only be used on functions.").into();
-//         }
-//     };
+/// Automatedly generate one Kani harness for comparing two methods.
+fn generate_harness_method(func: &Function, state_type: &Type) -> TokenStream {
+    let harness_name = quote::format_ident!("check___{}", func.name.replace("::", "___"));
+    let func_name = TokenStream::from_str(&func.name).unwrap();
+    let inputs = &func.item.sig.inputs;
 
-//     let func_name = &func.sig.ident;
-//     let inputs = &func.sig.inputs;
-//     let harness_name = quote::format_ident!("check_{}", func_name);
-//     let mut harness_body = Vec::new();
-//     let mut call_args: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut harness_body = Vec::new();
+    let mut call_args: Vec<TokenStream> = Vec::new();
 
-//     for arg in inputs {
-//         match arg {
-//             FnArg::Receiver(receiver) => {
-//                 let arg_placeholder = "self_receiver";
-//                 let init_stmt = receiver.init_for_type(arg_placeholder, &receiver.mutability);
-//                 harness_body.push(init_stmt);
-//                 let receiver_ident = quote::format_ident!("{}", arg_placeholder);
-//                 call_args.push(quote! { #receiver_ident });
-//             }
-//             FnArg::Typed(pat_type) => {
-//                 let arg_name = match &*pat_type.pat {
-//                     syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
-//                     _ => "arg".to_string(),
-//                 };
-//                 let arg_type = &pat_type.ty;
-//                 let mutability = match &*pat_type.pat {
-//                     Pat::Ident(pat_ident) => pat_ident.mutability,
-//                     _ => None,
-//                 };
-//                 let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
-//                 harness_body.push(init_stmt);
-//                 let arg_ident = quote::format_ident!("{}", arg_name);
-//                 call_args.push(quote! { #arg_ident });
-//             }
-//         }
-//     }
-//     let output = quote! {
-//         #func
+    let ident1 = quote::format_ident!("s1");
+    let ident2 = quote::format_ident!("s2");
+    let mut reference = None;
+    let mut mutability = None;
 
-//         #[cfg(any(kani, feature = "debug_log"))]
-//         #[kani::proof]
-//         #[kani::unwind(64)]
-//         /// Kani Harness Generated by autokani
-//         pub fn #harness_name() {
-//             #(#harness_body)*
-//             let _ = Self::#func_name(#(#call_args),*);
-//         }
-//     };
-//     output.into()
-// }
+    for arg in inputs {
+        match arg {
+            FnArg::Receiver(receiver) => {
+                mutability = receiver.mutability.clone();
+                reference = receiver.reference.clone();
+                // Init abstract state
+                let init_state_stmt = quote! {
+                    // TODO
+                    let state: u64  = kani::any();
+                };
+                // state_type.init_for_type("state", mutability);
+                let into_stmt = quote! {
+                    let #mutability #ident1 = state.into();
+                    let #mutability #ident2 = state.into();
+                };
+                harness_body.push(init_state_stmt);
+                harness_body.push(into_stmt);
+            }
+            FnArg::Typed(pat_type) => {
+                let arg_name = match &*pat_type.pat {
+                    syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
+                    _ => "arg".to_string(),
+                };
+                let arg_type = &pat_type.ty;
+                let mutability = match &*pat_type.pat {
+                    Pat::Ident(pat_ident) => pat_ident.mutability,
+                    _ => None,
+                };
+                let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
+                harness_body.push(init_stmt);
+                let arg_ident = quote::format_ident!("{}", arg_name);
+                call_args.push(quote! { #arg_ident });
+            }
+        }
+    }
+
+    let lifetime = match &reference {
+        Some((_, lt)) => lt.clone(),
+        None => None,
+    };
+    let reference = reference.map(|(and, lt)| and);
+
+    quote! {
+        #[cfg(kani)]
+        #[kani::proof]
+        #[allow(non_snake_case)]
+        pub fn #harness_name() {
+            #(#harness_body)*
+
+            let r1 = mod1::#func_name(#reference #lifetime #mutability #ident1, #(#call_args),*);
+            let r2 = mod2::#func_name(#reference #lifetime #mutability #ident2, #(#call_args),*);
+            assert_eq!(r1, r2);
+        }
+    }
+}
+
+const ARR_LIMIT: usize = 16;
+
+/// Any type implement ArbitraryInit trait can generate an init statement for itself
+trait ArbitraryInit {
+    /// Generate an init statement for the given type
+    fn init_for_type(&self, arg_name: &str, mutability: &Option<Mut>) -> TokenStream;
+}
+
+fn error_msg(msg: &str) -> proc_macro2::TokenStream {
+    quote! {
+        compile_error!(#msg);
+    }
+}
 
 impl ArbitraryInit for Receiver {
     fn init_for_type(&self, arg_name: &str, mutability: &Option<Mut>) -> proc_macro2::TokenStream {

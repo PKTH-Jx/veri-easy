@@ -13,11 +13,17 @@ pub struct Function {
     /// Fully-qualified name, e.g. "foo" or "MyType::bar" or "module::MyType::bar"
     pub name: String,
     pub item: ItemFn,
+    /// If the function is an impl method, the impl type.
+    pub impl_type: Option<Type>,
 }
 
 impl Function {
-    pub fn new(name: String, item: ItemFn) -> Self {
-        Self { name, item }
+    pub fn new(name: String, item: ItemFn, impl_type: Option<Type>) -> Self {
+        Self {
+            name,
+            item,
+            impl_type,
+        }
     }
 
     /// Pretty-print the function body
@@ -45,6 +51,7 @@ impl Debug for Function {
 struct FnCollector {
     funcs: Vec<Function>,
     scope_stack: Vec<String>,
+    impl_type: Option<Type>,
 }
 
 impl FnCollector {
@@ -52,6 +59,7 @@ impl FnCollector {
         Self {
             funcs: Vec::new(),
             scope_stack: Vec::new(),
+            impl_type: None,
         }
     }
     fn into_vec(self) -> Vec<Function> {
@@ -69,7 +77,8 @@ impl FnCollector {
 impl<'ast> Visit<'ast> for FnCollector {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
         let name = self.concat_name(&node.sig.ident.to_string());
-        self.funcs.push(Function::new(name, node.clone()));
+        self.funcs
+            .push(Function::new(name, node.clone(), self.impl_type.clone()));
         visit::visit_item_fn(self, node);
     }
 
@@ -81,8 +90,10 @@ impl<'ast> Visit<'ast> for FnCollector {
 
     fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
         self.scope_stack.push(type_to_string(&node.self_ty, "::"));
+        self.impl_type = Some(*node.self_ty.clone());
         visit::visit_item_impl(self, node);
         self.scope_stack.pop();
+        self.impl_type = None;
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
@@ -95,6 +106,7 @@ impl<'ast> Visit<'ast> for FnCollector {
                 sig: node.sig.clone(),
                 block: Box::new(node.block.clone()),
             },
+            impl_type: self.impl_type.clone(),
         });
         visit::visit_impl_item_fn(self, node);
     }
