@@ -108,10 +108,15 @@ impl CheckStep for Alive2 {
             return CheckResult::failed(e);
         }
 
-        let res = self.analyze_alive2_output(&res.unwrap());
-        self.remove_llvm_ir(out1).unwrap();
-        self.remove_llvm_ir(out2).unwrap();
+        let check_res = self.analyze_alive2_output(&res.unwrap());
 
-        res
+        if let Err(e) = self.remove_llvm_ir(out1) {
+            return CheckResult::failed(e);
+        }
+        if let Err(e) = self.remove_llvm_ir(out2) {
+            return CheckResult::failed(e);
+        }
+
+        check_res
     }
 }

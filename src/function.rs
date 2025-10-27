@@ -171,7 +171,7 @@ pub fn export_functions(src: &str) -> Result<String> {
 }
 
 /// Convert a type to a string
-fn type_to_string(ty: &Type, sep: &str) -> String {
+pub fn type_to_string(ty: &Type, sep: &str) -> String {
     match ty {
         Type::Path(tp) => tp
             .path

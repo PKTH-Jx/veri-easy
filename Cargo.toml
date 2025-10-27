@@ -8,3 +8,5 @@ regex = "1.12"
 anyhow = "1.0"
 syn = { version = "2", features = ["full", "visit", "visit-mut"] }
 prettyplease = "0.2"
+quote = "1.0"
+proc-macro2 = "1.0"

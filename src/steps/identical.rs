@@ -24,7 +24,7 @@ impl CheckStep for Identical {
 
         // only consider functions present in both srcs (unchecked sets already contain intersection)
         for f1 in &src1.unchecked_funcs {
-            if let Some(f2) = src2.unchecked_func(&f1.name) {
+            if let Some(f2) = src2.unchecked_func_by_signature(&f1) {
                 if f1.eq(f2) {
                     res.ok.push(f1.name.clone());
                 }

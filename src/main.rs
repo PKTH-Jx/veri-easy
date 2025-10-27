@@ -1,7 +1,7 @@
 use crate::{
     checker::{CheckStep, Checker},
     source::Source,
-    steps::{Alive2, Identical},
+    steps::{Alive2, Identical, Kani},
 };
 
 mod checker;
@@ -15,9 +15,10 @@ fn main() -> anyhow::Result<()> {
     let s2 = Source::new("b.rs")?;
     let steps: Vec<Box<dyn CheckStep>> = vec![
         Box::new(Identical),
-        Box::new(Alive2::new(
-            "/Users/jingx/Dev/os/verif/cmpir/alive2/build/alive-tv".to_owned(),
-        )),
+        // Box::new(Alive2::new(
+        //     "/Users/jingx/Dev/os/verif/cmpir/alive2/build/alive-tv".to_owned(),
+        // )),
+        Box::new(Kani),
     ];
 
     let mut checker = Checker::new(s1, s2, steps);
