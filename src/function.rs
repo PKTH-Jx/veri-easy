@@ -87,6 +87,9 @@ impl FnCollector {
 
 impl<'ast> Visit<'ast> for FnCollector {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        if !node.sig.generics.params.is_empty() {
+            return;
+        } // Skip generic functions
         let name = self.concat_name(&node.sig.ident.to_string());
         self.funcs
             .push(Function::new(name, node.clone(), self.impl_block.clone()));
@@ -108,6 +111,9 @@ impl<'ast> Visit<'ast> for FnCollector {
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        if !node.sig.generics.params.is_empty() {
+            return;
+        } // Skip generic functions
         let name = self.concat_name(&node.sig.ident.to_string());
         self.funcs.push(Function {
             name,

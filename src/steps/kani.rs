@@ -276,8 +276,8 @@ impl HarnessGenerator {
                     reference = receiver.reference.clone();
                     let construct_stmt = quote! {
                         #init
-                        let #ident1 = mod1::#constructor(#args);
-                        let #ident2 = mod2::#constructor(#args);
+                        let #mutability #ident1 = mod1::#constructor(#args);
+                        let #mutability #ident2 = mod2::#constructor(#args);
                     };
                     harness_body.push(construct_stmt);
                 }
@@ -419,12 +419,12 @@ impl ArbitraryInit for TypePath {
         if self.path.is_ident("u32") || self.path.is_ident("u64") || self.path.is_ident("usize") {
             quote! {
                 let #mutability #arg_ident = kani::any();
-                kani::assume(#arg_ident < 100000000);
+                kani::assume(#arg_ident < 10000);
             }
         } else if self.path.is_ident("i32") || self.path.is_ident("i64") {
             quote! {
                 let #mutability #arg_ident = kani::any();
-                kani::assume(#arg_ident < 100000000 && #arg_ident > -100000000);
+                kani::assume(#arg_ident < 10000 && #arg_ident > -10000);
             }
         } else if self.path.is_ident("String") || self.path.is_ident("str") {
             init_for_string(arg_name, mutability)
