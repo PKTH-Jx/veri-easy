@@ -2,9 +2,8 @@ use anyhow::Result;
 use prettyplease;
 use std::fmt::Debug;
 use syn::{
-    Attribute, File, ImplItemFn, ItemFn, ItemImpl, Type,
+    File, ImplItemFn, ItemFn, ItemImpl, Type,
     visit::{self, Visit},
-    visit_mut::{self, VisitMut},
 };
 
 /// Function identity + AST payload. Hash/Eq by `name` only.
@@ -13,17 +12,29 @@ pub struct Function {
     /// Fully-qualified name, e.g. "foo" or "MyType::bar" or "module::MyType::bar"
     pub name: String,
     pub item: ItemFn,
-    /// If the function is an impl method, the impl type.
-    pub impl_type: Option<Type>,
+    /// If the function is an impl method, the whole impl block.
+    pub impl_block: Option<ItemImpl>,
 }
 
 impl Function {
-    pub fn new(name: String, item: ItemFn, impl_type: Option<Type>) -> Self {
+    pub fn new(name: String, item: ItemFn, impl_block: Option<ItemImpl>) -> Self {
         Self {
             name,
             item,
-            impl_type,
+            impl_block,
         }
+    }
+
+    /// Get the scope of the function
+    pub fn scope(&self) -> String {
+        let mut scope = self.name.split("::").collect::<Vec<_>>();
+        scope.pop();
+        scope.join("::")
+    }
+
+    /// Get the identifier of the function
+    pub fn ident(&self) -> String {
+        self.name.split("::").last().unwrap_or("").to_string()
     }
 
     /// Pretty-print the function body
@@ -51,7 +62,7 @@ impl Debug for Function {
 struct FnCollector {
     funcs: Vec<Function>,
     scope_stack: Vec<String>,
-    impl_type: Option<Type>,
+    impl_block: Option<ItemImpl>,
 }
 
 impl FnCollector {
@@ -59,7 +70,7 @@ impl FnCollector {
         Self {
             funcs: Vec::new(),
             scope_stack: Vec::new(),
-            impl_type: None,
+            impl_block: None,
         }
     }
     fn into_vec(self) -> Vec<Function> {
@@ -78,7 +89,7 @@ impl<'ast> Visit<'ast> for FnCollector {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
         let name = self.concat_name(&node.sig.ident.to_string());
         self.funcs
-            .push(Function::new(name, node.clone(), self.impl_type.clone()));
+            .push(Function::new(name, node.clone(), self.impl_block.clone()));
         visit::visit_item_fn(self, node);
     }
 
@@ -90,10 +101,10 @@ impl<'ast> Visit<'ast> for FnCollector {
 
     fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
         self.scope_stack.push(type_to_string(&node.self_ty, "::"));
-        self.impl_type = Some(*node.self_ty.clone());
+        self.impl_block = Some(node.clone());
         visit::visit_item_impl(self, node);
         self.scope_stack.pop();
-        self.impl_type = None;
+        self.impl_block = None;
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
@@ -106,7 +117,7 @@ impl<'ast> Visit<'ast> for FnCollector {
                 sig: node.sig.clone(),
                 block: Box::new(node.block.clone()),
             },
-            impl_type: self.impl_type.clone(),
+            impl_block: self.impl_block.clone(),
         });
         visit::visit_impl_item_fn(self, node);
     }
@@ -118,68 +129,6 @@ pub fn collect_functions(src: &str) -> Result<Vec<Function>> {
     let mut collector = FnCollector::new();
     collector.visit_file(&syntax);
     Ok(collector.into_vec())
-}
-
-/// Visitor that sets `#[export_name = "..."]` on functions and impl methods.
-struct FnExporter {
-    scope_stack: Vec<String>,
-}
-
-impl FnExporter {
-    fn new() -> Self {
-        Self {
-            scope_stack: Vec::new(),
-        }
-    }
-    fn concat_name(&self, name: &str) -> String {
-        if self.scope_stack.is_empty() {
-            name.to_string()
-        } else {
-            self.scope_stack.join("___") + "___" + name
-        }
-    }
-}
-
-impl VisitMut for FnExporter {
-    fn visit_item_fn_mut(&mut self, node: &mut ItemFn) {
-        if node.sig.generics.lt_token.is_none() {
-            let name = self.concat_name(&node.sig.ident.to_string());
-            let attr: Attribute = syn::parse_quote!(#[export_name = #name]);
-            node.attrs.push(attr);
-        }
-        // skip function with generic params
-        visit_mut::visit_item_fn_mut(self, node);
-    }
-
-    fn visit_item_mod_mut(&mut self, i: &mut syn::ItemMod) {
-        self.scope_stack.push(i.ident.to_string());
-        visit_mut::visit_item_mod_mut(self, i);
-        self.scope_stack.pop();
-    }
-
-    fn visit_item_impl_mut(&mut self, node: &mut ItemImpl) {
-        if node.generics.lt_token.is_none() {
-            self.scope_stack.push(type_to_string(&node.self_ty, "___"));
-            visit_mut::visit_item_impl_mut(self, node);
-            self.scope_stack.pop();
-        }
-        // skip impl block with generic params
-    }
-
-    fn visit_impl_item_fn_mut(&mut self, node: &mut ImplItemFn) {
-        let name = self.concat_name(&node.sig.ident.to_string());
-        let attr: Attribute = syn::parse_quote!(#[export_name = #name]);
-        node.attrs.push(attr);
-        visit_mut::visit_impl_item_fn_mut(self, node);
-    }
-}
-
-/// Add `#[export_name = "..."]` to all functions and impl methods
-pub fn export_functions(src: &str) -> Result<String> {
-    let mut syntax: File = syn::parse_file(src)?;
-    let mut exporter = FnExporter::new();
-    exporter.visit_file_mut(&mut syntax);
-    Ok(prettyplease::unparse(&syntax))
 }
 
 /// Convert a type to a string

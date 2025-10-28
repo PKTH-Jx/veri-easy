@@ -2,10 +2,14 @@ use std::process::Command;
 
 use crate::{
     checker::{CheckResult, CheckStep},
-    function::export_functions,
+    function::type_to_string,
     source::Source,
 };
-use anyhow::anyhow;
+use anyhow::{Result, anyhow};
+use syn::{
+    Attribute, File, ImplItemFn, ItemFn, ItemImpl,
+    visit_mut::{self, VisitMut},
+};
 
 /// Alive2 step: use alive-tv to check function equivalence.
 pub struct Alive2 {
@@ -119,4 +123,66 @@ impl CheckStep for Alive2 {
 
         check_res
     }
+}
+
+/// Visitor that sets `#[export_name = "..."]` on functions and impl methods.
+struct FnExporter {
+    scope_stack: Vec<String>,
+}
+
+impl FnExporter {
+    fn new() -> Self {
+        Self {
+            scope_stack: Vec::new(),
+        }
+    }
+    fn concat_name(&self, name: &str) -> String {
+        if self.scope_stack.is_empty() {
+            name.to_string()
+        } else {
+            self.scope_stack.join("___") + "___" + name
+        }
+    }
+}
+
+impl VisitMut for FnExporter {
+    fn visit_item_fn_mut(&mut self, node: &mut ItemFn) {
+        if node.sig.generics.lt_token.is_none() {
+            let name = self.concat_name(&node.sig.ident.to_string());
+            let attr: Attribute = syn::parse_quote!(#[export_name = #name]);
+            node.attrs.push(attr);
+        }
+        // skip function with generic params
+        visit_mut::visit_item_fn_mut(self, node);
+    }
+
+    fn visit_item_mod_mut(&mut self, i: &mut syn::ItemMod) {
+        self.scope_stack.push(i.ident.to_string());
+        visit_mut::visit_item_mod_mut(self, i);
+        self.scope_stack.pop();
+    }
+
+    fn visit_item_impl_mut(&mut self, node: &mut ItemImpl) {
+        if node.generics.lt_token.is_none() {
+            self.scope_stack.push(type_to_string(&node.self_ty, "___"));
+            visit_mut::visit_item_impl_mut(self, node);
+            self.scope_stack.pop();
+        }
+        // skip impl block with generic params
+    }
+
+    fn visit_impl_item_fn_mut(&mut self, node: &mut ImplItemFn) {
+        let name = self.concat_name(&node.sig.ident.to_string());
+        let attr: Attribute = syn::parse_quote!(#[export_name = #name]);
+        node.attrs.push(attr);
+        visit_mut::visit_impl_item_fn_mut(self, node);
+    }
+}
+
+/// Add `#[export_name = "..."]` to all functions and impl methods
+fn export_functions(src: &str) -> Result<String> {
+    let mut syntax: File = syn::parse_file(src)?;
+    let mut exporter = FnExporter::new();
+    exporter.visit_file_mut(&mut syntax);
+    Ok(prettyplease::unparse(&syntax))
 }

@@ -2,13 +2,12 @@
 
 use anyhow::anyhow;
 use regex::Regex;
-use std::{io::Write, process::Command, str::FromStr};
+use std::{collections::BTreeMap, io::Write, process::Command, str::FromStr};
 
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{
-    AngleBracketedGenericArguments, FnArg, Ident, ImplItem, ImplItemFn, Item, ItemFn, ItemImpl,
-    ItemStruct, Pat, Path, Receiver, ReturnType, Type, TypeArray, TypePath, TypePtr, TypeReference,
+    FnArg, Pat, Path, Receiver, ReturnType, Type, TypeArray, TypePath, TypePtr, TypeReference,
     TypeSlice, TypeTuple, token::Mut,
 };
 
@@ -37,27 +36,19 @@ impl Kani {
                 #content2
             }
         };
-        let harness_fn = src1
-            .unchecked_funcs
-            .iter()
-            .filter(|f| f.impl_type.is_none())
-            .map(|f| generate_harness_fn(f))
-            .collect::<Vec<_>>();
-        let harness_method = src1
-            .unchecked_funcs
-            .iter()
-            .filter(|f| f.impl_type.is_some())
-            .map(|f| generate_harness_method(f, f.impl_type.as_ref().unwrap()))
-            .collect::<Vec<_>>();
+
+        let generator = HarnessGenerator::new(src1.unchecked_funcs.clone());
+        let functions = generator.generate_functions();
+        let methods = generator.generate_methods();
 
         Ok(quote! {
             #mod1
 
             #mod2
 
-            #(#harness_fn)*
+            #(#functions)*
 
-            #(#harness_method)*
+            #(#methods)*
         })
     }
 
@@ -108,7 +99,7 @@ impl Kani {
     }
 
     fn remove_harness_file(&self) -> anyhow::Result<()> {
-        std::fs::remove_file("harness.rs").map_err(|_| anyhow!("Failed to remove harness file"))?;
+        // std::fs::remove_file("harness.rs").map_err(|_| anyhow!("Failed to remove harness file"))?;
         Ok(())
     }
 }
@@ -150,83 +141,79 @@ impl CheckStep for Kani {
     }
 }
 
-/// Automatedly generate one Kani harness for comparing two free-standing functions.
-fn generate_harness_fn(func: &Function) -> TokenStream {
-    let harness_name = quote::format_ident!("check___{}", func.name.replace("::", "___"));
-    let func_name = TokenStream::from_str(&func.name).unwrap();
-    let inputs = &func.item.sig.inputs;
-
-    let mut harness_body = Vec::new();
-    let mut call_args: Vec<proc_macro2::TokenStream> = Vec::new();
-
-    for arg in inputs {
-        if let FnArg::Typed(pat_type) = arg {
-            let arg_name = match &*pat_type.pat {
-                syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
-                _ => "arg".to_string(),
-            };
-            let arg_type = &pat_type.ty;
-            let mutability = match &*pat_type.pat {
-                Pat::Ident(pat_ident) => pat_ident.mutability,
-                _ => None,
-            };
-            let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
-            harness_body.push(init_stmt);
-
-            let arg_ident = quote::format_ident!("{}", arg_name);
-            call_args.push(quote! { #arg_ident });
-        } else {
-            unreachable!("Free-standing function should not have receiver.");
-        }
-    }
-
-    quote! {
-        #[cfg(kani)]
-        #[kani::proof]
-        #[allow(non_snake_case)]
-        pub fn #harness_name() {
-            #(#harness_body)*
-
-            let r1 = mod1::#func_name(#(#call_args),*);
-            let r2 = mod2::#func_name(#(#call_args),*);
-            assert_eq!(r1, r2);
-        }
-    }
+/// Kani harness generator.
+#[derive(Debug)]
+struct HarnessGenerator {
+    /// Free-stand functions.
+    functions: Vec<Function>,
+    /// Methods (with `self` receiver).
+    methods: Vec<Function>,
+    /// Constructors (return `Self` type).
+    constructors: BTreeMap<String, Function>,
 }
 
-/// Automatedly generate one Kani harness for comparing two methods.
-fn generate_harness_method(func: &Function, state_type: &Type) -> TokenStream {
-    let harness_name = quote::format_ident!("check___{}", func.name.replace("::", "___"));
-    let func_name = TokenStream::from_str(&func.name).unwrap();
-    let inputs = &func.item.sig.inputs;
-
-    let mut harness_body = Vec::new();
-    let mut call_args: Vec<TokenStream> = Vec::new();
-
-    let ident1 = quote::format_ident!("s1");
-    let ident2 = quote::format_ident!("s2");
-    let mut reference = None;
-    let mut mutability = None;
-
-    for arg in inputs {
-        match arg {
-            FnArg::Receiver(receiver) => {
-                mutability = receiver.mutability.clone();
-                reference = receiver.reference.clone();
-                // Init abstract state
-                let init_state_stmt = quote! {
-                    // TODO
-                    let state: u64  = kani::any();
+impl HarnessGenerator {
+    /// Separate free-standing functions and methods.
+    fn new(functions: Vec<Function>) -> Self {
+        let mut res = Self {
+            functions: Vec::new(),
+            methods: Vec::new(),
+            constructors: BTreeMap::new(),
+        };
+        for func in functions {
+            if let Some(impl_block) = &func.impl_block {
+                // The name of the struct
+                let struct_name = match &*impl_block.self_ty {
+                    Type::Path(type_path) => type_path.path.get_ident(),
+                    _ => None,
                 };
-                // state_type.init_for_type("state", mutability);
-                let into_stmt = quote! {
-                    let #mutability #ident1 = state.into();
-                    let #mutability #ident2 = state.into();
-                };
-                harness_body.push(init_state_stmt);
-                harness_body.push(into_stmt);
+                if func
+                    .item
+                    .sig
+                    .inputs
+                    .iter()
+                    .any(|arg| matches!(arg, FnArg::Receiver(_)))
+                {
+                    // Has `self` receiver, consider it as a method.
+                    res.methods.push(func);
+                } else {
+                    if let ReturnType::Type(_, rt) = &func.item.sig.output {
+                        if let Type::Path(type_path) = &**rt {
+                            if type_path.path.is_ident("Self") {
+                                // Return `Self` type, consider it as a constructor.
+                                res.constructors.insert(func.scope(), func);
+                                continue;
+                            } else if let Some(name) = struct_name {
+                                if type_path.path.is_ident(name) {
+                                    // Return `struct_name` type, consider it as a constructor.
+                                    res.constructors.insert(func.scope(), func);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    // No `self` receiver and not return `Self` type, consider it as a free-standing function.
+                    res.functions.push(func);
+                }
+            } else {
+                // Function outside of impl block is a free-standing function.
+                res.functions.push(func);
             }
-            FnArg::Typed(pat_type) => {
+        }
+        res
+    }
+
+    /// Generate one Kani harness for comparing two free-standing functions.
+    fn generate_function(&self, func: &Function) -> TokenStream {
+        let harness_name = quote::format_ident!("check___{}", func.name.replace("::", "___"));
+        let func_name = TokenStream::from_str(&func.name).unwrap();
+        let inputs = &func.item.sig.inputs;
+
+        let mut harness_body = Vec::new();
+        let mut call_args: Vec<proc_macro2::TokenStream> = Vec::new();
+
+        for arg in inputs {
+            if let FnArg::Typed(pat_type) = arg {
                 let arg_name = match &*pat_type.pat {
                     syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
                     _ => "arg".to_string(),
@@ -238,29 +225,161 @@ fn generate_harness_method(func: &Function, state_type: &Type) -> TokenStream {
                 };
                 let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
                 harness_body.push(init_stmt);
+
                 let arg_ident = quote::format_ident!("{}", arg_name);
                 call_args.push(quote! { #arg_ident });
+            } else {
+                unreachable!("Free-standing function should not have receiver.");
+            }
+        }
+
+        quote! {
+            #[cfg(kani)]
+            #[kani::proof]
+            #[allow(non_snake_case)]
+            pub fn #harness_name() {
+                #(#harness_body)*
+
+                let r1 = mod1::#func_name(#(#call_args),*);
+                let r2 = mod2::#func_name(#(#call_args),*);
+                assert_eq!(r1, r2);
             }
         }
     }
 
-    let lifetime = match &reference {
-        Some((_, lt)) => lt.clone(),
-        None => None,
-    };
-    let reference = reference.map(|(and, lt)| and);
+    /// Generate one Kani harness for comparing two methods.
+    fn generate_method(&self, method: &Function) -> TokenStream {
+        let harness_name = quote::format_ident!("check___{}", method.name.replace("::", "___"));
+        let func_name = TokenStream::from_str(&method.name).unwrap();
+        let inputs = &method.item.sig.inputs;
 
-    quote! {
-        #[cfg(kani)]
-        #[kani::proof]
-        #[allow(non_snake_case)]
-        pub fn #harness_name() {
-            #(#harness_body)*
+        let mut harness_body = Vec::new();
+        let mut call_args: Vec<TokenStream> = Vec::new();
 
-            let r1 = mod1::#func_name(#reference #lifetime #mutability #ident1, #(#call_args),*);
-            let r2 = mod2::#func_name(#reference #lifetime #mutability #ident2, #(#call_args),*);
-            assert_eq!(r1, r2);
+        let ident1 = quote::format_ident!("s1");
+        let ident2 = quote::format_ident!("s2");
+        let mut reference = None;
+        let mut mutability = None;
+
+        let (init, constructor, args) = match self.construct(&method.scope()) {
+            Some((init, constructor, args)) => (init, constructor, args),
+            None => {
+                println!("No constructor found for struct: {}", method.scope());
+                return quote! {};
+            }
+        };
+
+        for arg in inputs {
+            match arg {
+                FnArg::Receiver(receiver) => {
+                    mutability = receiver.mutability.clone();
+                    reference = receiver.reference.clone();
+                    let construct_stmt = quote! {
+                        #init
+                        let #ident1 = mod1::#constructor(#args);
+                        let #ident2 = mod2::#constructor(#args);
+                    };
+                    harness_body.push(construct_stmt);
+                }
+                FnArg::Typed(pat_type) => {
+                    let arg_name = match &*pat_type.pat {
+                        syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
+                        _ => "arg".to_string(),
+                    };
+                    let arg_type = &pat_type.ty;
+                    let mutability = match &*pat_type.pat {
+                        Pat::Ident(pat_ident) => pat_ident.mutability,
+                        _ => None,
+                    };
+                    let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
+                    harness_body.push(init_stmt);
+                    let arg_ident = quote::format_ident!("{}", arg_name);
+                    call_args.push(quote! { #arg_ident });
+                }
+            }
         }
+
+        let lifetime = match &reference {
+            Some((_, lt)) => lt.clone(),
+            None => None,
+        };
+        let reference = reference.map(|(and, _)| and);
+
+        quote! {
+            #[cfg(kani)]
+            #[kani::proof]
+            #[allow(non_snake_case)]
+            pub fn #harness_name() {
+                #(#harness_body)*
+
+                let r1 = mod1::#func_name(#reference #lifetime #mutability #ident1, #(#call_args),*);
+                let r2 = mod2::#func_name(#reference #lifetime #mutability #ident2, #(#call_args),*);
+                assert_eq!(r1, r2);
+            }
+        }
+    }
+
+    /// Find the constructor of a struct, and use "kani::any()" as arguments to construct the struct.
+    ///
+    /// Returns (init_code, constructor_name, call_args)
+    fn construct(&self, struct_name: &str) -> Option<(TokenStream, TokenStream, TokenStream)> {
+        println!("{}", struct_name);
+        println!("{:?}", self.constructors);
+
+        let constructor = self.constructors.get(struct_name)?;
+        let func_name = TokenStream::from_str(&constructor.name).unwrap();
+        let inputs = &constructor.item.sig.inputs;
+
+        let mut init_code = Vec::new();
+        let mut call_args: Vec<TokenStream> = Vec::new();
+
+        for arg in inputs {
+            match arg {
+                FnArg::Receiver(_) => unreachable!("Constructor should not have receiver"),
+                FnArg::Typed(pat_type) => {
+                    let arg_name = match &*pat_type.pat {
+                        syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
+                        _ => "arg".to_string(),
+                    };
+                    let arg_type = &pat_type.ty;
+                    let mutability = match &*pat_type.pat {
+                        Pat::Ident(pat_ident) => pat_ident.mutability,
+                        _ => None,
+                    };
+                    let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
+                    init_code.push(init_stmt);
+
+                    let arg_ident = quote::format_ident!("{}", arg_name);
+                    call_args.push(quote! { #arg_ident });
+                }
+            }
+        }
+
+        Some((
+            quote! {
+                #(#init_code)*
+            },
+            func_name,
+            quote! {
+                #(#call_args),*
+            },
+        ))
+    }
+
+    /// Generate all free-standing functions
+    fn generate_functions(&self) -> Vec<TokenStream> {
+        self.functions
+            .iter()
+            .map(|func| self.generate_function(func))
+            .collect()
+    }
+
+    /// Generate all methods
+    fn generate_methods(&self) -> Vec<TokenStream> {
+        self.methods
+            .iter()
+            .map(|method| self.generate_method(method))
+            .collect()
     }
 }
 
@@ -350,7 +469,7 @@ impl ArbitraryInit for TypePath {
             } else if final_seg.ident == "Result" {
                 let result_type = inner_type.clone();
                 match result_type {
-                    syn::PathArguments::AngleBracketed(AngleBracketedGenericArguments {
+                    syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
                         args,
                         ..
                     }) => {
@@ -569,92 +688,10 @@ impl ArbitraryInit for TypeTuple {
 //             return error_msg("`extend_arbitrary` can only be used on impl blocks.").into();
 //         }
 //     };
-//     let impl_arbitrary = impl_arbitrary_via_constructor(&impl_block);
+//     let impl_arbitrary = construct_arbitrary(&impl_block);
 //     let output = quote! {
 //         #impl_block
 //         #impl_arbitrary
 //     };
 //     output.into()
-// }
-
-// fn find_constructor(impl_block: &ItemImpl, struct_name: Option<&Ident>) -> Option<ImplItemFn> {
-//     for item in &impl_block.items {
-//         if let ImplItem::Method(method) = item {
-//             if let ReturnType::Type(_, return_type) = &method.sig.output {
-//                 if let Type::Path(type_path) = &**return_type {
-//                     if type_path.path.is_ident("Self") {
-//                         return Some(method.clone());
-//                     }
-//                     if let Some(name) = struct_name {
-//                         if type_path.path.is_ident(name) {
-//                             return Some(method.clone());
-//                         }
-//                     }
-//                 }
-//             }
-//         }
-//     }
-//     None
-// }
-
-// fn impl_arbitrary_via_constructor(impl_block: &ItemImpl) -> Option<proc_macro2::TokenStream> {
-//     // This function should generate the `Arbitrary` impl block based on the `new` method.
-//     // You need to parse the `new` method and generate the corresponding `Arbitrary` impl block.
-//     let struct_name = match &*impl_block.self_ty {
-//         Type::Path(type_path) => type_path.path.get_ident(),
-//         _ => {
-//             return error_msg("`extend_arbitrary` can only be used on impl blocks of structs.")
-//                 .into();
-//         }
-//     };
-//     // let constructor = find_constructor(impl_block, struct_name)?;
-//     let constructor = match find_constructor(impl_block, struct_name) {
-//         Some(constructor) => constructor,
-//         None => {
-//             return Some(quote! {
-//                     impl kani::Arbitrary for Placeholder222 {
-//                     }
-//             });
-//         }
-//     };
-//     let inputs = &constructor.sig.inputs;
-//     let func_name = &constructor.sig.ident;
-//     let mut init_code = Vec::new();
-//     let mut call_args: Vec<proc_macro2::TokenStream> = Vec::new();
-
-//     for arg in inputs {
-//         match arg {
-//             FnArg::Receiver(_) => unreachable!(),
-//             FnArg::Typed(pat_type) => {
-//                 let arg_name = match &*pat_type.pat {
-//                     syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
-//                     _ => "arg".to_string(),
-//                 };
-//                 let arg_type = &pat_type.ty;
-//                 let mutability = match &*pat_type.pat {
-//                     Pat::Ident(pat_ident) => pat_ident.mutability,
-//                     _ => None,
-//                 };
-//                 let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
-//                 init_code.push(init_stmt);
-
-//                 let arg_ident = quote::format_ident!("{}", arg_name);
-//                 call_args.push(quote! { #arg_ident });
-//             }
-//         }
-//     }
-//     let impl_generics = &impl_block.generics;
-//     let self_ty = &impl_block.self_ty;
-//     let where_clause = &impl_block.generics.where_clause;
-//     Some(quote! {
-//         /// Arbitrary impl Generated by autokani
-//         #[cfg(any(kani, feature = "debug_log"))]
-//         impl #impl_generics kani::Arbitrary for #self_ty #where_clause {
-//             /// Automatically generate the `any` method based on constructor
-//             fn any() -> Self {
-//                 #(#init_code)*
-//                 Self::#func_name(#(#call_args),*)
-//             }
-//         }
-//     })
 // }
