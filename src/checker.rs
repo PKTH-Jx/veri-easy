@@ -1,6 +1,6 @@
 use anyhow::Error;
 
-use crate::source::Source;
+use crate::{function::CommonFunction, source::Source};
 
 /// Typed check result
 #[derive(Debug)]
@@ -34,20 +34,56 @@ pub trait CheckStep {
     }
 
     /// Run the check step
-    fn run(&self, src1: &Source, src2: &Source) -> CheckResult;
+    fn run(&self, checker: &Checker) -> CheckResult;
 }
 
 /// Checker coordinating multiple steps
 pub struct Checker {
-    src1: Source,
-    src2: Source,
+    /// Check steps to run
     steps: Vec<Box<dyn CheckStep>>,
+    /// Source 1
+    pub src1: Source,
+    /// Source 2
+    pub src2: Source,
+    /// Functions that has been verified
+    pub checked_funcs: Vec<CommonFunction>,
+    /// Functions that has not been verification
+    pub unchecked_funcs: Vec<CommonFunction>,
 }
 
 impl Checker {
     pub fn new(src1: Source, src2: Source, steps: Vec<Box<dyn CheckStep>>) -> Self {
-        let mut checker = Self { src1, src2, steps };
-        Source::set_ignored(&mut checker.src1, &mut checker.src2);
+        let mut checker = Self {
+            src1,
+            src2,
+            steps,
+            checked_funcs: Vec::new(),
+            unchecked_funcs: Vec::new(),
+        };
+        checker.src1.unique_funcs.iter().for_each(|func| {
+            if let Some(func2) = checker
+                .src2
+                .unique_funcs
+                .iter()
+                .find(|func2| func.sig_eq(&func2))
+            {
+                checker
+                    .unchecked_funcs
+                    .push(CommonFunction::new(func.clone(), func2.clone()).unwrap());
+            }
+        });
+        checker.src1.unique_funcs.retain(|func| {
+            !checker
+                .unchecked_funcs
+                .iter()
+                .any(|func2| func.name == func2.name())
+        });
+        checker.src2.unique_funcs.retain(|func| {
+            !checker
+                .unchecked_funcs
+                .iter()
+                .any(|func2| func.name == func2.name())
+        });
         checker
     }
 
@@ -60,15 +96,21 @@ impl Checker {
                 None => println!("Step `{}`", step.name()),
             }
 
-            let res = step.run(&self.src1, &self.src2);
+            let res = step.run(&self);
             if let Err(e) = res.status {
                 println!("Step `{}` failed to execute: {}", step.name(), e);
             }
 
-            for func in &res.ok {
-                println!("  ✅ OK: {}", func);
-                self.src1.set_checked(func);
-                self.src2.set_checked(func);
+            for name in &res.ok {
+                println!("  ✅ OK: {}", name);
+                if let Some(func) = self
+                    .unchecked_funcs
+                    .iter()
+                    .find(|func2| func2.name() == name)
+                {
+                    self.checked_funcs.push(func.clone());
+                    self.unchecked_funcs.retain(|func2| func2.name() != name);
+                }
             }
             self.print_state();
 
@@ -81,8 +123,8 @@ impl Checker {
             }
         }
 
-        if !self.src1.unchecked_funcs.is_empty() {
-            let names: Vec<_> = self.src1.unchecked_funcs.iter().map(|f| &f.name).collect();
+        if !self.unchecked_funcs.is_empty() {
+            let names: Vec<_> = self.unchecked_funcs.iter().map(|f| f.name()).collect();
             Err(anyhow::anyhow!("Unchecked functions remain: {:?}", names))
         } else {
             Ok(())
@@ -92,7 +134,9 @@ impl Checker {
     /// Print current state of the checker
     pub fn print_state(&self) {
         println!("Checker state:");
-        println!("  Source 1: {:?}", self.src1);
-        println!("  Source 2: {:?}", self.src2);
+        println!("  Checked: {:?}", self.checked_funcs);
+        println!("  Unchecked: {:?}", self.unchecked_funcs);
+        println!("  Source1 Unique: {:?}", self.src1.unique_funcs);
+        println!("  Source2 Unique: {:?}", self.src2.unique_funcs);
     }
 }

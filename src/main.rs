@@ -15,10 +15,10 @@ fn main() -> anyhow::Result<()> {
     let s2 = Source::new("b.rs")?;
     let steps: Vec<Box<dyn CheckStep>> = vec![
         Box::new(Identical),
-        // Box::new(Alive2::new(
-        //     "/Users/jingx/Dev/os/verif/cmpir/alive2/build/alive-tv".to_owned(),
-        // )),
         Box::new(Kani),
+        Box::new(Alive2::new(
+            "/Users/jingx/Dev/os/verif/cmpir/alive2/build/alive-tv".to_owned(),
+        )),
     ];
 
     let mut checker = Checker::new(s1, s2, steps);

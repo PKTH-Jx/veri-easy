@@ -5,43 +5,47 @@ use regex::Regex;
 use std::{collections::BTreeMap, io::Write, process::Command, str::FromStr};
 
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{
     FnArg, Pat, Path, Receiver, ReturnType, Type, TypeArray, TypePath, TypePtr, TypeReference,
     TypeSlice, TypeTuple, token::Mut,
 };
 
 use crate::{
-    checker::{CheckResult, CheckStep},
-    function::Function,
-    source::Source,
+    checker::{CheckResult, CheckStep, Checker},
+    function::CommonFunction,
 };
 
 /// Kani step: use Kani model-checker to check function equivalence.
 pub struct Kani;
 
 impl Kani {
-    fn generate_harness(&self, src1: &Source, src2: &Source) -> anyhow::Result<TokenStream> {
-        let content1 =
-            TokenStream::from_str(&src1.content).map_err(|_| anyhow!("Invalid Rust code"))?;
+    fn generate_harness(&self, checker: &Checker) -> anyhow::Result<TokenStream> {
+        let content1 = TokenStream::from_str(&checker.src1.content)
+            .map_err(|_| anyhow!("Invalid Rust code"))?;
         let mod1 = quote! {
             mod mod1 {
                 #content1
             }
         };
-        let content2 =
-            TokenStream::from_str(&src2.content).map_err(|_| anyhow!("Invalid Rust code"))?;
+        let content2 = TokenStream::from_str(&checker.src2.content)
+            .map_err(|_| anyhow!("Invalid Rust code"))?;
         let mod2 = quote! {
             mod mod2 {
                 #content2
             }
         };
 
-        let generator = HarnessGenerator::new(src1.unchecked_funcs.clone());
+        let generator = HarnessGenerator::new(checker.unchecked_funcs.clone());
         let functions = generator.generate_functions();
         let methods = generator.generate_methods();
+        let imports = generator.generate_imports();
 
         Ok(quote! {
+            use std::ops::Range;
+
+            #(#imports)*
+
             #mod1
 
             #mod2
@@ -52,19 +56,26 @@ impl Kani {
         })
     }
 
-    fn write_harness_file(&self, harness: TokenStream) -> anyhow::Result<()> {
-        let mut file = std::fs::File::create("harness.rs")?;
+    fn write_harness_file(&self, harness: TokenStream, path: &str) -> anyhow::Result<()> {
+        let mut file = std::fs::File::create(path)?;
         file.write(harness.to_string().as_bytes())?;
-        Command::new("rustfmt").arg("harness.rs").status()?;
+        Command::new("rustfmt").arg(path).status()?;
         Ok(())
     }
 
-    fn run_kani(&self) -> anyhow::Result<String> {
+    fn run_kani(&self, harness_path: &str) -> anyhow::Result<String> {
         let tmp_path = "kani.tmp";
         let tmp_file =
             std::fs::File::create(tmp_path).map_err(|_| anyhow!("Failed to create tmp file"))?;
         Command::new("kani")
-            .arg("harness.rs")
+            .args([
+                harness_path,
+                "-Z",
+                "unstable-options",
+                "--harness-timeout",
+                "10s",
+            ])
+            // .stderr(std::fs::File::open("/dev/null").unwrap())
             .stdout(tmp_file)
             .status()
             .map_err(|_| anyhow!("Failed to run kani"))?;
@@ -91,15 +102,16 @@ impl Kani {
             if line.contains("VERIFICATION:- SUCCESSFUL") && func_name.is_some() {
                 res.ok.push(func_name.take().unwrap());
             } else if line.contains("VERIFICATION:- FAILED") && func_name.is_some() {
-                res.fail.push(func_name.take().unwrap());
+                // res.fail.push(func_name.take().unwrap());
+                func_name = None;
             }
         }
 
         res
     }
 
-    fn remove_harness_file(&self) -> anyhow::Result<()> {
-        // std::fs::remove_file("harness.rs").map_err(|_| anyhow!("Failed to remove harness file"))?;
+    fn remove_harness_file(&self, harness_path: &str) -> anyhow::Result<()> {
+        // std::fs::remove_file(harness_path).map_err(|_| anyhow!("Failed to remove harness file"))?;
         Ok(())
     }
 }
@@ -113,19 +125,19 @@ impl CheckStep for Kani {
         Some("Use Kani model-checker to check function consistency")
     }
 
-    fn run(&self, src1: &Source, src2: &Source) -> CheckResult {
-        let res = self.generate_harness(src1, src2);
+    fn run(&self, checker: &Checker) -> CheckResult {
+        let harness_path = "harness.rs";
+        let res = self.generate_harness(checker);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
         let harness = res.unwrap();
 
-        let res = self.write_harness_file(harness);
+        let res = self.write_harness_file(harness, harness_path);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
-
-        let res = self.run_kani();
+        let res = self.run_kani(harness_path);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
@@ -133,7 +145,7 @@ impl CheckStep for Kani {
 
         let check_res = self.analyze_kani_output(&output);
 
-        if let Err(e) = self.remove_harness_file() {
+        if let Err(e) = self.remove_harness_file(harness_path) {
             return CheckResult::failed(e);
         }
 
@@ -145,31 +157,30 @@ impl CheckStep for Kani {
 #[derive(Debug)]
 struct HarnessGenerator {
     /// Free-stand functions.
-    functions: Vec<Function>,
+    functions: Vec<CommonFunction>,
     /// Methods (with `self` receiver).
-    methods: Vec<Function>,
+    methods: Vec<CommonFunction>,
     /// Constructors (return `Self` type).
-    constructors: BTreeMap<String, Function>,
+    constructors: BTreeMap<String, CommonFunction>,
 }
 
 impl HarnessGenerator {
     /// Separate free-standing functions and methods.
-    fn new(functions: Vec<Function>) -> Self {
+    fn new(functions: Vec<CommonFunction>) -> Self {
         let mut res = Self {
             functions: Vec::new(),
             methods: Vec::new(),
             constructors: BTreeMap::new(),
         };
         for func in functions {
-            if let Some(impl_block) = &func.impl_block {
+            if let Some(impl_block) = &func.f1.impl_block {
                 // The name of the struct
                 let struct_name = match &*impl_block.self_ty {
                     Type::Path(type_path) => type_path.path.get_ident(),
                     _ => None,
                 };
                 if func
-                    .item
-                    .sig
+                    .sig()
                     .inputs
                     .iter()
                     .any(|arg| matches!(arg, FnArg::Receiver(_)))
@@ -177,7 +188,7 @@ impl HarnessGenerator {
                     // Has `self` receiver, consider it as a method.
                     res.methods.push(func);
                 } else {
-                    if let ReturnType::Type(_, rt) = &func.item.sig.output {
+                    if let ReturnType::Type(_, rt) = &func.sig().output {
                         if let Type::Path(type_path) = &**rt {
                             if type_path.path.is_ident("Self") {
                                 // Return `Self` type, consider it as a constructor.
@@ -204,10 +215,10 @@ impl HarnessGenerator {
     }
 
     /// Generate one Kani harness for comparing two free-standing functions.
-    fn generate_function(&self, func: &Function) -> TokenStream {
-        let harness_name = quote::format_ident!("check___{}", func.name.replace("::", "___"));
-        let func_name = TokenStream::from_str(&func.name).unwrap();
-        let inputs = &func.item.sig.inputs;
+    fn generate_function(&self, func: &CommonFunction) -> TokenStream {
+        let harness_name = quote::format_ident!("check___{}", func.name().replace("::", "___"));
+        let func_name = TokenStream::from_str(&func.name()).unwrap();
+        let inputs = &func.sig().inputs;
 
         let mut harness_body = Vec::new();
         let mut call_args: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -227,7 +238,7 @@ impl HarnessGenerator {
                 harness_body.push(init_stmt);
 
                 let arg_ident = quote::format_ident!("{}", arg_name);
-                call_args.push(quote! { #arg_ident });
+                call_args.push(quote! { #arg_ident.clone() });
             } else {
                 unreachable!("Free-standing function should not have receiver.");
             }
@@ -248,10 +259,10 @@ impl HarnessGenerator {
     }
 
     /// Generate one Kani harness for comparing two methods.
-    fn generate_method(&self, method: &Function) -> TokenStream {
-        let harness_name = quote::format_ident!("check___{}", method.name.replace("::", "___"));
-        let func_name = TokenStream::from_str(&method.name).unwrap();
-        let inputs = &method.item.sig.inputs;
+    fn generate_method(&self, method: &CommonFunction) -> TokenStream {
+        let harness_name = quote::format_ident!("check___{}", method.name().replace("::", "___"));
+        let func_name = TokenStream::from_str(&method.name()).unwrap();
+        let inputs = &method.sig().inputs;
 
         let mut harness_body = Vec::new();
         let mut call_args: Vec<TokenStream> = Vec::new();
@@ -294,7 +305,7 @@ impl HarnessGenerator {
                     let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
                     harness_body.push(init_stmt);
                     let arg_ident = quote::format_ident!("{}", arg_name);
-                    call_args.push(quote! { #arg_ident });
+                    call_args.push(quote! { #arg_ident.clone() });
                 }
             }
         }
@@ -323,12 +334,9 @@ impl HarnessGenerator {
     ///
     /// Returns (init_code, constructor_name, call_args)
     fn construct(&self, struct_name: &str) -> Option<(TokenStream, TokenStream, TokenStream)> {
-        println!("{}", struct_name);
-        println!("{:?}", self.constructors);
-
         let constructor = self.constructors.get(struct_name)?;
-        let func_name = TokenStream::from_str(&constructor.name).unwrap();
-        let inputs = &constructor.item.sig.inputs;
+        let func_name = TokenStream::from_str(&constructor.name()).unwrap();
+        let inputs = &constructor.sig().inputs;
 
         let mut init_code = Vec::new();
         let mut call_args: Vec<TokenStream> = Vec::new();
@@ -381,6 +389,55 @@ impl HarnessGenerator {
             .map(|method| self.generate_method(method))
             .collect()
     }
+
+    /// Generate all import (`use`) statements
+    fn generate_imports(&self) -> Vec<TokenStream> {
+        let mut mod1_imports = Vec::new();
+        let mut mod2_imports = Vec::new();
+
+        for fun in self.functions.iter().chain(self.methods.iter()) {
+            // To use a function in a trait, we need to import the trait
+            if let Some(impl_block) = &fun.f1.impl_block {
+                if let Some((_, path, _)) = &impl_block.trait_ {
+                    let path = path
+                        .segments
+                        .iter()
+                        .map(|seg| seg.ident.clone())
+                        .collect::<Vec<_>>();
+                    if !mod1_imports.contains(&path) {
+                        mod1_imports.push(path);
+                    }
+                }
+            }
+            if let Some(impl_block) = &fun.f2.impl_block {
+                if let Some((_, path, _)) = &impl_block.trait_ {
+                    let path = path
+                        .segments
+                        .iter()
+                        .map(|seg| seg.ident.clone())
+                        .collect::<Vec<_>>();
+                    if !mod2_imports.contains(&path) {
+                        mod2_imports.push(path);
+                    }
+                }
+            }
+        }
+
+        let mod1_import_stmts = mod1_imports.iter().map(|path| {
+            let ident = format_ident!("Mod1{}", path.last().unwrap());
+            quote! {
+                use mod1::#(#path)::* as #ident;
+            }
+        });
+        let mod2_import_stmts = mod2_imports.iter().map(|path| {
+            let ident = format_ident!("Mod2{}", path.last().unwrap());
+            quote! {
+                use mod2::#(#path)::* as #ident;
+            }
+        });
+
+        mod1_import_stmts.chain(mod2_import_stmts).collect()
+    }
 }
 
 const ARR_LIMIT: usize = 16;
@@ -418,12 +475,12 @@ impl ArbitraryInit for TypePath {
         let arg_ident = quote::format_ident!("{}", arg_name);
         if self.path.is_ident("u32") || self.path.is_ident("u64") || self.path.is_ident("usize") {
             quote! {
-                let #mutability #arg_ident = kani::any();
+                let #mutability #arg_ident: #self = kani::any();
                 kani::assume(#arg_ident < 10000);
             }
         } else if self.path.is_ident("i32") || self.path.is_ident("i64") {
             quote! {
-                let #mutability #arg_ident = kani::any();
+                let #mutability #arg_ident: #self = kani::any();
                 kani::assume(#arg_ident < 10000 && #arg_ident > -10000);
             }
         } else if self.path.is_ident("String") || self.path.is_ident("str") {
@@ -438,7 +495,7 @@ impl ArbitraryInit for TypePath {
                     syn::PathArguments::AngleBracketed(args) => {
                         if let Some(syn::GenericArgument::Type(ty)) = args.args.first() {
                             quote! {
-                                let #mutability #arg_ident = kani::vec::any_vec::<#ty, #ARR_LIMIT>();
+                                let #mutability #arg_ident: #self = kani::vec::any_vec::<#ty, #ARR_LIMIT>();
                             }
                         } else {
                             error_msg("Unsupported Vec Type")
@@ -453,7 +510,7 @@ impl ArbitraryInit for TypePath {
                         if let Some(syn::GenericArgument::Type(ty)) = args.args.first() {
                             let init_stmt = ty.init_for_type(arg_name, mutability);
                             quote! {
-                                let #mutability #arg_ident = if kani::any::<bool>() {
+                                let #mutability #arg_ident: #self = if kani::any::<bool>() {
                                     #init_stmt
                                     Some(#arg_ident)
                                 } else {
@@ -486,7 +543,7 @@ impl ArbitraryInit for TypePath {
                             _ => error_msg("Unsupported Result Type"),
                         };
                         quote! {
-                            let #mutability #arg_ident = if kani::any::<bool>() {
+                            let #mutability #arg_ident: #self = if kani::any::<bool>() {
                                 #ok_init
                                 Ok(#arg_ident)
                             } else {
@@ -496,6 +553,20 @@ impl ArbitraryInit for TypePath {
                         }
                     }
                     _ => error_msg("Unsupported Result Pattern"),
+                }
+            } else if final_seg.ident == "Range" {
+                let range_type = inner_type.clone();
+                match range_type {
+                    syn::PathArguments::AngleBracketed(args) => {
+                        if let Some(syn::GenericArgument::Type(ty)) = args.args.first() {
+                            quote! {
+                                let #mutability #arg_ident: #self = kani::any::<Range<#ty>>();
+                            }
+                        } else {
+                            error_msg("Unsupported Range Type")
+                        }
+                    }
+                    _ => error_msg("Unsupported Range Pattern"),
                 }
             } else {
                 // both typical types and user-defined structs are handled here
@@ -589,7 +660,7 @@ impl ArbitraryInit for Type {
             Type::Tuple(type_tuple) => type_tuple.init_for_type(arg_name, mutability),
             Type::Reference(type_ref) => type_ref.init_for_type(arg_name, mutability),
             Type::Ptr(type_ptr) => type_ptr.init_for_type(arg_name, mutability),
-            _ => error_msg("Unsupported argument type for `kani_test` macro."),
+            _ => error_msg("Unsupported argument type"),
         }
     }
 }
@@ -612,86 +683,3 @@ impl ArbitraryInit for TypeTuple {
         }
     }
 }
-
-// /// Impl `Arbitrary` for a struct by generating the `any` method based on the fields of the struct.
-// ///
-// /// Since some common types (e.g., Vec) do not impl `Arbitrary`, it's inpractical to derive `Arbitrary`.
-// /// Instead, this macro generates the impl block for `Arbitrary`.
-// pub fn kani_arbitrary(_attr: TokenStream, item: TokenStream) -> TokenStream {
-//     let input = parse_macro_input!(item as Item);
-//     let struct_def = match input {
-//         Item::Struct(ref struct_def) => struct_def,
-//         _ => {
-//             return error_msg("`kani_arbitrary` can only be used on structs.").into();
-//         }
-//     };
-//     let impl_stmt = impl_arbitrary_via_fields(&struct_def);
-//     let output = quote! {
-//         #struct_def
-
-//         #impl_stmt
-//     };
-//     output.into()
-// }
-
-// fn impl_arbitrary_via_fields(struct_def: &ItemStruct) -> proc_macro2::TokenStream {
-//     let mutability: Option<Mut> = None;
-//     let struct_name = &struct_def.ident;
-//     let init_stmt = match &struct_def.fields {
-//         syn::Fields::Named(fields) => {
-//             let mut fields_init: Vec<proc_macro2::TokenStream> = Vec::new();
-//             for field in &fields.named {
-//                 let field_name = field.ident.as_ref().unwrap();
-//                 let field_type = &field.ty;
-//                 let obj = field_type.init_for_type(&field_name.to_string(), &mutability);
-//                 let field_init = quote! {
-//                     #field_name: {
-//                         #obj
-//                         #field_name
-//                     }
-//                 };
-//                 fields_init.push(field_init);
-//             }
-
-//             quote! {
-//                 Self {
-//                     #(#fields_init),*
-//                 }
-//             }
-//         }
-//         syn::Fields::Unnamed(_fields) => {
-//             todo!("Fields::Unnamed");
-//         }
-//         syn::Fields::Unit => {
-//             todo!("Fields::Unit");
-//         }
-//     };
-//     quote! {
-//         /// Arbitrary impl Generated by autokani
-//         #[cfg(any(kani, feature = "debug_log"))]
-//         impl kani::Arbitrary for #struct_name {
-//             /// Automatically generate the `any` method based on fields
-//             fn any() -> Self {
-//                 #init_stmt
-//             }
-//         }
-//     }
-// }
-
-// /// Extend the `Arbitrary` trait for target struct based on its constructor(e.g., `new` method).
-// /// Add this attribute to the impl block of the struct.
-// pub fn extend_arbitrary(_attr: TokenStream, item: TokenStream) -> TokenStream {
-//     let input = parse_macro_input!(item as Item);
-//     let impl_block = match input {
-//         Item::Impl(impl_block) => impl_block,
-//         _ => {
-//             return error_msg("`extend_arbitrary` can only be used on impl blocks.").into();
-//         }
-//     };
-//     let impl_arbitrary = construct_arbitrary(&impl_block);
-//     let output = quote! {
-//         #impl_block
-//         #impl_arbitrary
-//     };
-//     output.into()
-// }

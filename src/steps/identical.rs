@@ -1,7 +1,4 @@
-use crate::{
-    checker::{CheckResult, CheckStep},
-    source::Source,
-};
+use crate::checker::{CheckResult, CheckStep, Checker};
 
 /// Identical step: if bodies are identical -> ok; if same name but different body -> undetermined.
 pub struct Identical;
@@ -15,7 +12,7 @@ impl CheckStep for Identical {
         Some("Compare function bodies for identity")
     }
 
-    fn run(&self, src1: &Source, src2: &Source) -> CheckResult {
+    fn run(&self, checker: &Checker) -> CheckResult {
         let mut res = CheckResult {
             status: Ok(()),
             ok: vec![],
@@ -23,11 +20,9 @@ impl CheckStep for Identical {
         };
 
         // only consider functions present in both srcs (unchecked sets already contain intersection)
-        for f1 in &src1.unchecked_funcs {
-            if let Some(f2) = src2.unchecked_func_by_signature(&f1) {
-                if f1.eq(f2) {
-                    res.ok.push(f1.name.clone());
-                }
+        for func in &checker.unchecked_funcs {
+            if func.f1.body() == func.f2.body() {
+                res.ok.push(func.name().to_owned());
             }
         }
 

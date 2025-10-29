@@ -1,8 +1,8 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use prettyplease;
 use std::fmt::Debug;
 use syn::{
-    File, ImplItemFn, ItemFn, ItemImpl, Type,
+    File, ImplItemFn, ItemFn, ItemImpl, Signature, Type,
     visit::{self, Visit},
 };
 
@@ -46,15 +46,68 @@ impl Function {
         })
     }
 
-    /// Eq by both `name` and `body`
-    pub fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.body() == other.body()
+    /// Equal by Signature
+    pub fn sig_eq(&self, other: &Self) -> bool {
+        let sig1 = &self.item.sig;
+        let sig2 = &other.item.sig;
+
+        sig1.ident == sig2.ident
+            && sig1.inputs.len() == sig2.inputs.len()
+            && sig1
+                .inputs
+                .iter()
+                .zip(sig2.inputs.iter())
+                .all(|(a, b)| match (a, b) {
+                    (syn::FnArg::Receiver(_), syn::FnArg::Receiver(_)) => true,
+                    (syn::FnArg::Typed(a), syn::FnArg::Typed(b)) => type_eq(&a.ty, &b.ty),
+                    _ => false,
+                })
+            && match (&sig1.output, &sig2.output) {
+                (syn::ReturnType::Default, syn::ReturnType::Default) => true,
+                (syn::ReturnType::Type(_, a), syn::ReturnType::Type(_, b)) => type_eq(a, b),
+                _ => false,
+            }
     }
 }
 
 impl Debug for Function {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name)
+    }
+}
+
+/// Function shared by 2 source files, with same signature but different bodies.
+#[derive(Clone)]
+pub struct CommonFunction {
+    pub f1: Function,
+    pub f2: Function,
+}
+
+impl CommonFunction {
+    pub fn new(f1: Function, f2: Function) -> Result<Self> {
+        if !f1.sig_eq(&f2) {
+            Err(anyhow!("Functions have different signatures"))
+        } else {
+            Ok(Self { f1, f2 })
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.f1.name
+    }
+
+    pub fn scope(&self) -> String {
+        self.f1.scope()
+    }
+
+    pub fn sig(&self) -> &Signature {
+        &self.f1.item.sig
+    }
+}
+
+impl Debug for CommonFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
     }
 }
 
@@ -149,4 +202,9 @@ pub fn type_to_string(ty: &Type, sep: &str) -> String {
             .join(sep),
         _ => "unsupported".to_owned(),
     }
+}
+
+/// Check if two types are equal
+fn type_eq(a: &Type, b: &Type) -> bool {
+    type_to_string(a, "::") == type_to_string(b, "::")
 }

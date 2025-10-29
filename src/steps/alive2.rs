@@ -1,9 +1,8 @@
 use std::process::Command;
 
 use crate::{
-    checker::{CheckResult, CheckStep},
+    checker::{CheckResult, CheckStep, Checker},
     function::type_to_string,
-    source::Source,
 };
 use anyhow::{Result, anyhow};
 use syn::{
@@ -94,15 +93,15 @@ impl CheckStep for Alive2 {
         Some("Use alive-tv to check function equivalence")
     }
 
-    fn run(&self, src1: &Source, src2: &Source) -> CheckResult {
+    fn run(&self, checker: &Checker) -> CheckResult {
         let out1 = "alive2_1.ll";
         let out2 = "alive2_2.ll";
 
-        let res = self.compile_to_llvm_ir(&src1.path, out1);
+        let res = self.compile_to_llvm_ir(&checker.src1.path, out1);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
-        let res = self.compile_to_llvm_ir(&src2.path, out2);
+        let res = self.compile_to_llvm_ir(&checker.src2.path, out2);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
