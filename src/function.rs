@@ -1,8 +1,8 @@
 use anyhow::{Result, anyhow};
 use prettyplease;
-use std::fmt::Debug;
+use std::{collections::BTreeMap, fmt::Debug};
 use syn::{
-    File, ImplItemFn, ItemFn, ItemImpl, Signature, Type,
+    File, FnArg, ImplItemFn, ItemFn, ItemImpl, ReturnType, Signature, Type,
     visit::{self, Visit},
 };
 
@@ -33,7 +33,7 @@ impl Function {
     }
 
     /// Get the identifier of the function
-    pub fn ident(&self) -> String {
+    pub fn _ident(&self) -> String {
         self.name.split("::").last().unwrap_or("").to_string()
     }
 
@@ -112,13 +112,13 @@ impl Debug for CommonFunction {
 }
 
 /// Visitor that collects free functions and impl methods.
-struct FnCollector {
+struct FunctionCollector {
     funcs: Vec<Function>,
     scope_stack: Vec<String>,
     impl_block: Option<ItemImpl>,
 }
 
-impl FnCollector {
+impl FunctionCollector {
     fn new() -> Self {
         Self {
             funcs: Vec::new(),
@@ -138,7 +138,7 @@ impl FnCollector {
     }
 }
 
-impl<'ast> Visit<'ast> for FnCollector {
+impl<'ast> Visit<'ast> for FunctionCollector {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
         if !node.sig.generics.params.is_empty() {
             return;
@@ -185,7 +185,7 @@ impl<'ast> Visit<'ast> for FnCollector {
 /// Parse a file and collect functions
 pub fn collect_functions(src: &str) -> Result<Vec<Function>> {
     let syntax: File = syn::parse_file(src)?;
-    let mut collector = FnCollector::new();
+    let mut collector = FunctionCollector::new();
     collector.visit_file(&syntax);
     Ok(collector.into_vec())
 }
@@ -207,4 +207,65 @@ pub fn type_to_string(ty: &Type, sep: &str) -> String {
 /// Check if two types are equal
 fn type_eq(a: &Type, b: &Type) -> bool {
     type_to_string(a, "::") == type_to_string(b, "::")
+}
+
+/// Used to classify functions into free-standing functions, methods and constructors.
+pub struct FunctionClassifier {
+    /// Free-standing functions.
+    pub functions: Vec<CommonFunction>,
+    /// Methods (with `self` receiver).
+    pub methods: Vec<CommonFunction>,
+    /// Constructors (return `Self` type).
+    pub constructors: BTreeMap<String, CommonFunction>,
+}
+
+impl FunctionClassifier {
+    /// Classify functions into free-standing functions, methods and constructors.
+    pub fn classify(functions: Vec<CommonFunction>) -> Self {
+        let mut res = Self {
+            functions: Vec::new(),
+            methods: Vec::new(),
+            constructors: BTreeMap::new(),
+        };
+        for func in functions {
+            if let Some(impl_block) = &func.f1.impl_block {
+                // The name of the struct
+                let struct_name = match &*impl_block.self_ty {
+                    Type::Path(type_path) => type_path.path.get_ident(),
+                    _ => None,
+                };
+                if func
+                    .sig()
+                    .inputs
+                    .iter()
+                    .any(|arg| matches!(arg, FnArg::Receiver(_)))
+                {
+                    // Has `self` receiver, consider it as a method.
+                    res.methods.push(func);
+                } else {
+                    if let ReturnType::Type(_, rt) = &func.sig().output {
+                        if let Type::Path(type_path) = &**rt {
+                            if type_path.path.is_ident("Self") {
+                                // Return `Self` type, consider it as a constructor.
+                                res.constructors.insert(func.scope(), func);
+                                continue;
+                            } else if let Some(name) = struct_name {
+                                if type_path.path.is_ident(name) {
+                                    // Return `struct_name` type, consider it as a constructor.
+                                    res.constructors.insert(func.scope(), func);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    // No `self` receiver and not return `Self` type, consider it as a free-standing function.
+                    res.functions.push(func);
+                }
+            } else {
+                // Function outside of impl block is a free-standing function.
+                res.functions.push(func);
+            }
+        }
+        res
+    }
 }
