@@ -96,6 +96,11 @@ impl CommonFunction {
         &self.f1.name
     }
 
+    /// Replace "::" with "___" to make it a valid identifier
+    pub fn flat_name(&self) -> String {
+        self.f1.name.replace("::", "___")
+    }
+
     pub fn scope(&self) -> String {
         self.f1.scope()
     }
@@ -267,5 +272,33 @@ impl FunctionClassifier {
             }
         }
         res
+    }
+
+    /// If `methods` doesn't have a method of type `T`, then its constructor is unused. This function
+    /// removes those constructors.
+    pub fn remove_unused_constructors(&mut self) {
+        let mut unused_constructors = Vec::new();
+        for (name, _) in &self.constructors {
+            if !self.methods.iter().any(|method| method.scope() == *name) {
+                unused_constructors.push(name.clone());
+            }
+        }
+        for name in unused_constructors {
+            self.constructors.remove(&name);
+        }
+    }
+
+    /// If `methods` has a method of type `T`, but `constructors` doesn't have a constructor of type `T`.
+    /// This function removes those methods.
+    pub fn remove_no_constructor_methods(&mut self) {
+        let mut no_constructor_methods = Vec::new();
+        for method in &self.methods {
+            if !self.constructors.contains_key(&method.scope()) {
+                no_constructor_methods.push(method.name().to_owned());
+            }
+        }
+        for method in no_constructor_methods {
+            self.methods.retain(|m| m.name() != method);
+        }
     }
 }
