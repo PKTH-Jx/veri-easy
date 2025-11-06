@@ -215,6 +215,7 @@ fn type_eq(a: &Type, b: &Type) -> bool {
 }
 
 /// Used to classify functions into free-standing functions, methods and constructors.
+#[derive(Debug)]
 pub struct FunctionClassifier {
     /// Free-standing functions.
     pub functions: Vec<CommonFunction>,

@@ -1,6 +1,10 @@
 //! Differential Fuzzing step.
 
-use std::{io::Write, process::Command, str::FromStr};
+use std::{
+    io::{BufRead, BufReader, Write},
+    process::Command,
+    str::FromStr,
+};
 
 use crate::{
     checker::{CheckResult, CheckStep, Checker},
@@ -9,6 +13,7 @@ use crate::{
 use anyhow::anyhow;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use regex::Regex;
 use syn::FnArg;
 
 /// Collect a function's arguments into a struct.
@@ -229,14 +234,16 @@ impl HarnessGenerator {
 
                 // Do method call
                 let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || mod1::#method_name_tk(#reference #lifetime #mutability s1, #(method_arg_struct.#method_args),*) )).map_err(|_| ());
+                        || mod1::#method_name_tk(#reference #lifetime #mutability s1, #(method_arg_struct.#method_args),*)
+                    )).map_err(|_| ());
                 let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || mod2::#method_name_tk(#reference #lifetime #mutability s2, #(method_arg_struct.#method_args),*) )).map_err(|_| ());
+                        || mod2::#method_name_tk(#reference #lifetime #mutability s2, #(method_arg_struct.#method_args),*)
+                    )).map_err(|_| ());
 
-                if r1 != r2 {
+                if r1 != r2 || s1.get_val() != s2.get_val() {
                     println!("MISMATCH: {}", #method_name);
                 }
-                r1 == r2
+                r1 == r2 && s1.get_val() == s2.get_val()
             }
         }
     }
@@ -313,6 +320,64 @@ impl HarnessGenerator {
 /// Differential Fuzzing step.
 pub struct DifferentialFuzzing;
 
+impl DifferentialFuzzing {
+    fn generate_harness_file(&self, checker: &Checker) -> TokenStream {
+        HarnessGenerator::new(checker.unchecked_funcs.clone()).generate_harness()
+    }
+
+    fn write_harness_file(&self, harness: TokenStream, harness_path: &str) -> anyhow::Result<()> {
+        let _ = std::fs::File::create(harness_path)
+            .unwrap()
+            .write_all(harness.to_string().as_bytes());
+        let _ = Command::new("rustfmt")
+            .args([harness_path, "--unstable-features", "--skip-children"])
+            .status();
+        Ok(())
+    }
+
+    /// Run libAFL fuzzer and save the ouput in "df.tmp".
+    fn run_fuzzer(&self, fuzzer_path: &str) -> anyhow::Result<()> {
+        let tmp_file =
+            std::fs::File::create("df.tmp").map_err(|_| anyhow!("Failed to create tmp file"))?;
+        let cur_dir = std::env::current_dir().unwrap();
+
+        let _ = std::env::set_current_dir(fuzzer_path);
+        Command::new("cargo")
+            .args(["run", "--release"])
+            .stdout(tmp_file)
+            .stderr(std::fs::File::open("/dev/null").unwrap())
+            .status()
+            .map_err(|_| anyhow!("Failed to run kani"))?;
+        let _ = std::env::set_current_dir(cur_dir);
+
+        Ok(())
+    }
+
+    /// Analyze the fuzzer output and return the functions that are not checked.
+    fn analyze_fuzzer_output(&self, functions: &[CommonFunction]) -> CheckResult {
+        let mut res = CheckResult {
+            status: Ok(()),
+            ok: functions.iter().map(|f| f.name().to_owned()).collect(),
+            fail: vec![],
+        };
+
+        let re = Regex::new(r"MISMATCH:\s*(\S+)").unwrap();
+        let file = std::fs::File::open("df.tmp").unwrap();
+        let reader = BufReader::new(file);
+
+        for line in reader.lines() {
+            if let Some(caps) = re.captures(&line.unwrap()) {
+                let func_name = caps[1].to_string();
+                if let Some(i) = res.ok.iter().position(|f| *f == func_name) {
+                    res.ok.swap_remove(i);
+                }
+            }
+        }
+
+        res
+    }
+}
+
 impl CheckStep for DifferentialFuzzing {
     fn name(&self) -> &str {
         "Differential Fuzzing"
@@ -323,14 +388,21 @@ impl CheckStep for DifferentialFuzzing {
     }
 
     fn run(&self, checker: &Checker) -> CheckResult {
-        let harness = HarnessGenerator::new(checker.unchecked_funcs.clone()).generate_harness();
-        println!("{}", harness);
-        let _ = std::fs::File::create("harness.rs")
-            .unwrap()
-            .write_all(harness.to_string().as_bytes());
-        let _ = Command::new("rustfmt")
-            .args(["harness.rs", "--unstable-features", "--skip-children"])
-            .status();
-        CheckResult::failed(anyhow!("unimplemented!"))
+        let harness_path = "/Users/jingx/Dev/playground/fuzz/harness/src/lib.rs";
+        let fuzzer_path = "/Users/jingx/Dev/playground/fuzz";
+
+        let harness = self.generate_harness_file(checker);
+
+        let res = self.write_harness_file(harness, harness_path);
+        if let Err(e) = res {
+            return CheckResult::failed(e);
+        }
+
+        let res = self.run_fuzzer(fuzzer_path);
+        if let Err(e) = res {
+            return CheckResult::failed(e);
+        }
+
+        self.analyze_fuzzer_output(&checker.unchecked_funcs)
     }
 }
