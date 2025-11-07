@@ -16,43 +16,6 @@ use quote::{format_ident, quote};
 use regex::Regex;
 use syn::FnArg;
 
-/// Collect a function's arguments into a struct.
-fn generate_function_arg_struct(function: &CommonFunction) -> TokenStream {
-    let struct_name = format_ident!("Args{}", function.flat_name());
-    let mut fields = Vec::<TokenStream>::new();
-    for arg in &function.sig().inputs {
-        fields.push(quote! {
-            #arg
-        });
-    }
-
-    quote! {
-        #[derive(serde::Deserialize)]
-        pub struct #struct_name {
-            #(pub #fields),*
-        }
-    }
-}
-
-/// Collect a method's arguments into a struct.
-fn generate_method_arg_struct(method: &CommonFunction) -> TokenStream {
-    let struct_name = format_ident!("Args{}", method.flat_name());
-    let mut fields = Vec::<TokenStream>::new();
-    for arg in &method.sig().inputs {
-        if matches!(arg, FnArg::Typed(_)) {
-            fields.push(quote! {
-                #arg
-            });
-        }
-    }
-    quote! {
-        #[derive(serde::Deserialize)]
-        pub struct #struct_name {
-            #(pub #fields),*
-        }
-    }
-}
-
 /// Differential fuzzing harness generator.
 pub struct HarnessGenerator {
     /// All functions used in the fuzzing process.
@@ -68,20 +31,57 @@ impl HarnessGenerator {
         Self { funcs: classifier }
     }
 
+    /// Collect a function's arguments into a struct.
+    fn generate_function_arg_struct(&self, function: &CommonFunction) -> TokenStream {
+        let struct_name = format_ident!("Args{}", function.flat_name());
+        let mut fields = Vec::<TokenStream>::new();
+        for arg in &function.sig().inputs {
+            fields.push(quote! {
+                #arg
+            });
+        }
+
+        quote! {
+            #[derive(Debug, serde::Deserialize)]
+            pub struct #struct_name {
+                #(pub #fields),*
+            }
+        }
+    }
+
+    /// Collect a method's arguments into a struct.
+    fn generate_method_arg_struct(&self, method: &CommonFunction) -> TokenStream {
+        let struct_name = format_ident!("Args{}", method.flat_name());
+        let mut fields = Vec::<TokenStream>::new();
+        for arg in &method.sig().inputs {
+            if matches!(arg, FnArg::Typed(_)) {
+                fields.push(quote! {
+                    #arg
+                });
+            }
+        }
+        quote! {
+            #[derive(Debug, serde::Deserialize)]
+            pub struct #struct_name {
+                #(pub #fields),*
+            }
+        }
+    }
+
     /// Generate Argument structs.
     fn generate_arg_structs(&self) -> TokenStream {
         let func_structs = self
             .funcs
             .functions
             .iter()
-            .map(|func| generate_function_arg_struct(func))
+            .map(|func| self.generate_function_arg_struct(func))
             .collect::<Vec<_>>();
 
         let mut method_structs = Vec::<TokenStream>::new();
         let mut used_constructors = Vec::<&CommonFunction>::new();
         for method in &self.funcs.methods {
             let constructor = self.funcs.constructors.get(&method.scope()).unwrap();
-            method_structs.push(generate_method_arg_struct(method));
+            method_structs.push(self.generate_method_arg_struct(method));
             if !used_constructors
                 .iter()
                 .any(|c| c.name() == constructor.name())
@@ -92,7 +92,7 @@ impl HarnessGenerator {
 
         let constructor_structs = used_constructors
             .iter()
-            .map(|func| generate_function_arg_struct(func))
+            .map(|func| self.generate_function_arg_struct(func))
             .collect::<Vec<_>>();
 
         quote! {
@@ -142,6 +142,8 @@ impl HarnessGenerator {
 
                 if r1 != r2 {
                     println!("MISMATCH {}", #function_name);
+                    println!("function: {:?}", function_arg_struct);
+                    println!("r1 = {:?}, r2 = {:?}", r1, r2);
                 }
                 r1 == r2
             }
@@ -242,6 +244,10 @@ impl HarnessGenerator {
 
                 if r1 != r2 || s1.get_val() != s2.get_val() {
                     println!("MISMATCH: {}", #method_name);
+                    println!("contructor: {:?}", constr_arg_struct);
+                    println!("method: {:?}", method_arg_struct);
+                    println!("r1 = {:?}, r2 = {:?}", r1, r2);
+                    println!("s1 = {:?}, s2 = {:?}", s1.get_val(), s2.get_val());
                 }
                 r1 == r2 && s1.get_val() == s2.get_val()
             }
@@ -321,8 +327,18 @@ impl HarnessGenerator {
 pub struct DifferentialFuzzing;
 
 impl DifferentialFuzzing {
-    fn generate_harness_file(&self, checker: &Checker) -> TokenStream {
-        HarnessGenerator::new(checker.unchecked_funcs.clone()).generate_harness()
+    fn generate_harness_file(&self, checker: &Checker) -> (Vec<String>, TokenStream) {
+        let generator = HarnessGenerator::new(checker.unchecked_funcs.clone());
+        // Collect functions and methods that are checked in harness
+        let functions = generator
+            .funcs
+            .functions
+            .iter()
+            .map(|f| f.name().to_owned())
+            .chain(generator.funcs.methods.iter().map(|f| f.name().to_owned()))
+            .collect::<Vec<_>>();
+        let harness = generator.generate_harness();
+        (functions, harness)
     }
 
     fn write_harness_file(&self, harness: TokenStream, harness_path: &str) -> anyhow::Result<()> {
@@ -354,10 +370,10 @@ impl DifferentialFuzzing {
     }
 
     /// Analyze the fuzzer output and return the functions that are not checked.
-    fn analyze_fuzzer_output(&self, functions: &[CommonFunction]) -> CheckResult {
+    fn analyze_fuzzer_output(&self, functions: &[String]) -> CheckResult {
         let mut res = CheckResult {
             status: Ok(()),
-            ok: functions.iter().map(|f| f.name().to_owned()).collect(),
+            ok: functions.to_vec(),
             fail: vec![],
         };
 
@@ -391,7 +407,7 @@ impl CheckStep for DifferentialFuzzing {
         let harness_path = "/Users/jingx/Dev/playground/fuzz/harness/src/lib.rs";
         let fuzzer_path = "/Users/jingx/Dev/playground/fuzz";
 
-        let harness = self.generate_harness_file(checker);
+        let (functions, harness) = self.generate_harness_file(checker);
 
         let res = self.write_harness_file(harness, harness_path);
         if let Err(e) = res {
@@ -403,6 +419,6 @@ impl CheckStep for DifferentialFuzzing {
             return CheckResult::failed(e);
         }
 
-        self.analyze_fuzzer_output(&checker.unchecked_funcs)
+        self.analyze_fuzzer_output(&functions)
     }
 }
