@@ -2,7 +2,12 @@
 
 use anyhow::anyhow;
 use regex::Regex;
-use std::{collections::BTreeMap, io::Write, process::Command, str::FromStr};
+use std::{
+    collections::BTreeMap,
+    io::{BufRead, Write},
+    process::Command,
+    str::FromStr,
+};
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -16,31 +21,267 @@ use crate::{
     function::{CommonFunction, FunctionClassifier},
 };
 
-/// Kani step: use Kani model-checker to check function equivalence.
-pub struct Kani;
+/// Kani harness generator.
+struct HarnessGenerator {
+    /// All functions used in the kani step.
+    classifier: FunctionClassifier,
+}
 
-impl Kani {
-    /// Generate harness code for Kani.
-    fn generate_harness(&self, checker: &Checker) -> anyhow::Result<TokenStream> {
-        let classifier = FunctionClassifier::classify(checker.unchecked_funcs.clone());
+impl HarnessGenerator {
+    /// Create a new DifferentialFuzzing step.
+    pub fn new(functions: Vec<CommonFunction>) -> Self {
+        let mut classifier = FunctionClassifier::classify(functions);
+        classifier.remove_unused_constructors();
+        classifier.remove_no_constructor_methods();
+        Self { classifier }
+    }
 
-        let functions = generate_functions(&classifier.functions);
-        let methods = generate_methods(&classifier.constructors, &classifier.methods);
-        let imports = generate_imports(&classifier.functions, &classifier.methods);
+    /// Generate one Kani harness for comparing two free-standing functions.
+    fn generate_function(&self, func: &CommonFunction) -> TokenStream {
+        let harness_name = quote::format_ident!("check___{}", func.flat_name());
+        let func_name = TokenStream::from_str(&func.name()).unwrap();
+        let inputs = &func.sig().inputs;
 
-        Ok(quote! {
+        let mut harness_body = Vec::new();
+        let mut call_args: Vec<proc_macro2::TokenStream> = Vec::new();
+
+        for arg in inputs {
+            if let FnArg::Typed(pat_type) = arg {
+                let arg_name = match &*pat_type.pat {
+                    syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
+                    _ => "arg".to_string(),
+                };
+                let arg_type = &pat_type.ty;
+                let mutability = match &*pat_type.pat {
+                    Pat::Ident(pat_ident) => pat_ident.mutability,
+                    _ => None,
+                };
+                let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
+                harness_body.push(init_stmt);
+
+                let arg_ident = quote::format_ident!("{}", arg_name);
+                call_args.push(quote! { #arg_ident.clone() });
+            } else {
+                unreachable!("Free-standing function should not have receiver.");
+            }
+        }
+
+        quote! {
+            #[cfg(kani)]
+            #[kani::proof]
+            #[allow(non_snake_case)]
+            pub fn #harness_name() {
+                #(#harness_body)*
+
+                let r1 = mod1::#func_name(#(#call_args),*);
+                let r2 = mod2::#func_name(#(#call_args),*);
+                assert_eq!(r1, r2);
+            }
+        }
+    }
+
+    /// Generate one Kani harness for comparing two methods.
+    fn generate_method(&self, method: &CommonFunction) -> TokenStream {
+        let harness_name = quote::format_ident!("check___{}", method.flat_name());
+        let func_name = TokenStream::from_str(method.name()).unwrap();
+        let inputs = &method.sig().inputs;
+
+        let mut harness_body = Vec::new();
+        let mut call_args: Vec<TokenStream> = Vec::new();
+
+        let mut reference = None;
+        let mut mutability = None;
+        let (init, constructor, args) = self.construct(method.name());
+
+        for arg in inputs {
+            match arg {
+                FnArg::Receiver(receiver) => {
+                    mutability = receiver.mutability.clone();
+                    reference = receiver.reference.clone();
+                    let construct_stmt = quote! {
+                        #init
+                        let #mutability s1 = mod1::#constructor(#args);
+                        let #mutability s2 = mod2::#constructor(#args);
+                    };
+                    harness_body.push(construct_stmt);
+                }
+                FnArg::Typed(pat_type) => {
+                    let arg_name = match &*pat_type.pat {
+                        syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
+                        _ => "arg".to_string(),
+                    };
+                    let arg_type = &pat_type.ty;
+                    let mutability = match &*pat_type.pat {
+                        Pat::Ident(pat_ident) => pat_ident.mutability,
+                        _ => None,
+                    };
+                    let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
+                    harness_body.push(init_stmt);
+                    let arg_ident = quote::format_ident!("{}", arg_name);
+                    call_args.push(quote! { #arg_ident.clone() });
+                }
+            }
+        }
+        let reference = reference.map(|(and, _)| and);
+
+        quote! {
+            #[cfg(kani)]
+            #[kani::proof]
+            #[allow(non_snake_case)]
+            pub fn #harness_name() {
+                #(#harness_body)*
+
+                let r1 = mod1::#func_name(#reference #mutability s1, #(#call_args),*);
+                let r2 = mod2::#func_name(#reference #mutability s2, #(#call_args),*);
+                assert_eq!(r1, r2);
+            }
+        }
+    }
+
+    /// Find the constructor of a struct, and use "kani::any()" as arguments to construct the struct.
+    ///
+    /// Returns (init_code, constructor_name, call_args)
+    fn construct(&self, method_name: &str) -> (TokenStream, TokenStream, TokenStream) {
+        let constructor = self.classifier.constructors.get(method_name).unwrap();
+        let name = TokenStream::from_str(constructor.name()).unwrap();
+        let inputs = &constructor.sig().inputs;
+
+        let mut init_code = Vec::new();
+        let mut call_args: Vec<TokenStream> = Vec::new();
+
+        for arg in inputs {
+            match arg {
+                FnArg::Receiver(_) => unreachable!("Constructor should not have receiver"),
+                FnArg::Typed(pat_type) => {
+                    let arg_name = match &*pat_type.pat {
+                        syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
+                        _ => "arg".to_string(),
+                    };
+                    let arg_type = &pat_type.ty;
+                    let mutability = match &*pat_type.pat {
+                        Pat::Ident(pat_ident) => pat_ident.mutability,
+                        _ => None,
+                    };
+                    let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
+                    init_code.push(init_stmt);
+
+                    let arg_ident = quote::format_ident!("{}", arg_name);
+                    call_args.push(quote! { #arg_ident });
+                }
+            }
+        }
+
+        (
+            quote! {
+                #(#init_code)*
+            },
+            name,
+            quote! {
+                #(#call_args),*
+            },
+        )
+    }
+
+    /// Generate all free-standing functions
+    fn generate_functions(&self) -> Vec<TokenStream> {
+        self.classifier
+            .functions
+            .iter()
+            .map(|func| self.generate_function(func))
+            .collect()
+    }
+
+    /// Generate all methods
+    fn generate_methods(&self) -> Vec<TokenStream> {
+        self.classifier
+            .methods
+            .iter()
+            .map(|method| self.generate_method(method))
+            .collect()
+    }
+
+    /// Generate all import (`use`) statements
+    fn generate_imports(&self) -> Vec<TokenStream> {
+        let mut mod1_imports = Vec::new();
+        let mut mod2_imports = Vec::new();
+
+        for func in self
+            .classifier
+            .functions
+            .iter()
+            .chain(self.classifier.methods.iter())
+        {
+            // To use a function in a trait, we need to import the trait
+            if let Some(impl_block) = &func.f1.impl_block {
+                if let Some((_, path, _)) = &impl_block.trait_ {
+                    let path = path
+                        .segments
+                        .iter()
+                        .map(|seg| seg.ident.clone())
+                        .collect::<Vec<_>>();
+                    if !mod1_imports.contains(&path) {
+                        mod1_imports.push(path);
+                    }
+                }
+            }
+            if let Some(impl_block) = &func.f2.impl_block {
+                if let Some((_, path, _)) = &impl_block.trait_ {
+                    let path = path
+                        .segments
+                        .iter()
+                        .map(|seg| seg.ident.clone())
+                        .collect::<Vec<_>>();
+                    if !mod2_imports.contains(&path) {
+                        mod2_imports.push(path);
+                    }
+                }
+            }
+        }
+
+        let mod1_import_stmts = mod1_imports.iter().map(|path| {
+            let ident = format_ident!("Mod1{}", path.last().unwrap());
+            quote! {
+                use mod1::#(#path)::* as #ident;
+            }
+        });
+        let mod2_import_stmts = mod2_imports.iter().map(|path| {
+            let ident = format_ident!("Mod2{}", path.last().unwrap());
+            quote! {
+                use mod2::#(#path)::* as #ident;
+            }
+        });
+
+        mod1_import_stmts.chain(mod2_import_stmts).collect()
+    }
+
+    /// Generate harness file
+    fn generate_harness(&self) -> TokenStream {
+        let functions = self.generate_functions();
+        let methods = self.generate_methods();
+        let imports = self.generate_imports();
+
+        quote! {
             use std::ops::Range;
             mod mod1;
             mod mod2;
 
             #(#imports)*
-
             #(#functions)*
-
             #(#methods)*
 
             fn main() {}
-        })
+        }
+    }
+}
+
+/// Kani step: use Kani model-checker to check function equivalence.
+pub struct Kani;
+
+impl Kani {
+    /// Generate harness code for Kani.
+    fn generate_harness(&self, checker: &Checker) -> TokenStream {
+        let generator = HarnessGenerator::new(checker.unchecked_funcs.clone());
+        generator.generate_harness()
     }
 
     /// Create a cargo project for Kani harness.
@@ -103,29 +344,25 @@ kani = "*"
         Ok(())
     }
 
-    /// Run Kani and get the result.
-    fn run_kani(&self, harness_path: &str) -> anyhow::Result<String> {
-        let tmp_path = "kani.tmp";
-        let tmp_file =
-            std::fs::File::create(tmp_path).map_err(|_| anyhow!("Failed to create tmp file"))?;
+    /// Run Kani and save the output.
+    fn run_kani(&self, harness_path: &str, output_path: &str) -> anyhow::Result<()> {
+        let output_file = std::fs::File::create(output_path)
+            .map_err(|_| anyhow!("Failed to create output file"))?;
+        let cur_dir = std::env::current_dir().unwrap();
 
         let _ = std::env::set_current_dir(harness_path);
         Command::new("cargo")
             .args(["kani", "-Z", "unstable-options", "--harness-timeout", "10s"])
-            .stdout(tmp_file)
+            .stdout(output_file)
             .status()
             .map_err(|_| anyhow!("Failed to run kani"))?;
-        let _ = std::env::set_current_dir("..");
+        let _ = std::env::set_current_dir(cur_dir);
 
-        let output =
-            std::fs::read_to_string(tmp_path).map_err(|_| anyhow!("Failed to read tmp file"))?;
-        std::fs::remove_file(tmp_path).map_err(|_| anyhow!("Failed to remove tmp file"))?;
-
-        Ok(output)
+        Ok(())
     }
 
-    /// Analyze the output of Kani.
-    fn analyze_kani_output(&self, output: &str) -> CheckResult {
+    /// Analyze Kani output from "kani.tmp".
+    fn analyze_kani_output(&self, output_path: &str) -> CheckResult {
         let mut res = CheckResult {
             status: Ok(()),
             ok: vec![],
@@ -133,16 +370,18 @@ kani = "*"
         };
 
         let re = Regex::new(r"Checking harness check___([0-9a-zA-Z_]+)\.").unwrap();
+        let file = std::fs::File::open(output_path).unwrap();
+        let reader = std::io::BufReader::new(file);
         let mut func_name: Option<String> = None;
 
-        for line in output.lines() {
-            if let Some(caps) = re.captures(line) {
+        for line in reader.lines() {
+            let line = line.unwrap();
+            if let Some(caps) = re.captures(&line) {
                 func_name = Some(caps[1].replace("___", "::"));
             }
             if line.contains("VERIFICATION:- SUCCESSFUL") && func_name.is_some() {
                 res.ok.push(func_name.take().unwrap());
             } else if line.contains("VERIFICATION:- FAILED") && func_name.is_some() {
-                // res.fail.push(func_name.take().unwrap());
                 func_name = None;
             }
         }
@@ -169,23 +408,19 @@ impl CheckStep for Kani {
 
     fn run(&self, checker: &Checker) -> CheckResult {
         let harness_path = "kani_harness";
-        let res = self.generate_harness(checker);
-        if let Err(e) = res {
-            return CheckResult::failed(e);
-        }
-        let harness = res.unwrap();
+        let harness = self.generate_harness(checker);
 
         let res = self.create_harness_project(checker, harness, harness_path);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
-        let res = self.run_kani(harness_path);
+
+        let output_path = "kani.tmp";
+        let res = self.run_kani(harness_path, output_path);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
-        let output = res.unwrap();
-
-        let check_res = self.analyze_kani_output(&output);
+        let check_res = self.analyze_kani_output(output_path);
 
         if let Err(e) = self.remove_harness_project(harness_path) {
             return CheckResult::failed(e);
@@ -193,230 +428,6 @@ impl CheckStep for Kani {
 
         check_res
     }
-}
-
-/// Generate one Kani harness for comparing two free-standing functions.
-fn generate_function(func: &CommonFunction) -> TokenStream {
-    let harness_name = quote::format_ident!("check___{}", func.flat_name());
-    let func_name = TokenStream::from_str(&func.name()).unwrap();
-    let inputs = &func.sig().inputs;
-
-    let mut harness_body = Vec::new();
-    let mut call_args: Vec<proc_macro2::TokenStream> = Vec::new();
-
-    for arg in inputs {
-        if let FnArg::Typed(pat_type) = arg {
-            let arg_name = match &*pat_type.pat {
-                syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
-                _ => "arg".to_string(),
-            };
-            let arg_type = &pat_type.ty;
-            let mutability = match &*pat_type.pat {
-                Pat::Ident(pat_ident) => pat_ident.mutability,
-                _ => None,
-            };
-            let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
-            harness_body.push(init_stmt);
-
-            let arg_ident = quote::format_ident!("{}", arg_name);
-            call_args.push(quote! { #arg_ident.clone() });
-        } else {
-            unreachable!("Free-standing function should not have receiver.");
-        }
-    }
-
-    quote! {
-        #[cfg(kani)]
-        #[kani::proof]
-        #[allow(non_snake_case)]
-        pub fn #harness_name() {
-            #(#harness_body)*
-
-            let r1 = mod1::#func_name(#(#call_args),*);
-            let r2 = mod2::#func_name(#(#call_args),*);
-            assert_eq!(r1, r2);
-        }
-    }
-}
-
-/// Generate one Kani harness for comparing two methods.
-fn generate_method(constructor: &CommonFunction, method: &CommonFunction) -> TokenStream {
-    let harness_name = quote::format_ident!("check___{}", method.flat_name());
-    let func_name = TokenStream::from_str(&method.name()).unwrap();
-    let inputs = &method.sig().inputs;
-
-    let mut harness_body = Vec::new();
-    let mut call_args: Vec<TokenStream> = Vec::new();
-
-    let ident1 = quote::format_ident!("s1");
-    let ident2 = quote::format_ident!("s2");
-    let mut reference = None;
-    let mut mutability = None;
-
-    let (init, constructor, args) = construct(constructor);
-
-    for arg in inputs {
-        match arg {
-            FnArg::Receiver(receiver) => {
-                mutability = receiver.mutability.clone();
-                reference = receiver.reference.clone();
-                let construct_stmt = quote! {
-                    #init
-                    let #mutability #ident1 = mod1::#constructor(#args);
-                    let #mutability #ident2 = mod2::#constructor(#args);
-                };
-                harness_body.push(construct_stmt);
-            }
-            FnArg::Typed(pat_type) => {
-                let arg_name = match &*pat_type.pat {
-                    syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
-                    _ => "arg".to_string(),
-                };
-                let arg_type = &pat_type.ty;
-                let mutability = match &*pat_type.pat {
-                    Pat::Ident(pat_ident) => pat_ident.mutability,
-                    _ => None,
-                };
-                let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
-                harness_body.push(init_stmt);
-                let arg_ident = quote::format_ident!("{}", arg_name);
-                call_args.push(quote! { #arg_ident.clone() });
-            }
-        }
-    }
-
-    let lifetime = match &reference {
-        Some((_, lt)) => lt.clone(),
-        None => None,
-    };
-    let reference = reference.map(|(and, _)| and);
-
-    quote! {
-        #[cfg(kani)]
-        #[kani::proof]
-        #[allow(non_snake_case)]
-        pub fn #harness_name() {
-            #(#harness_body)*
-
-            let r1 = mod1::#func_name(#reference #lifetime #mutability #ident1, #(#call_args),*);
-            let r2 = mod2::#func_name(#reference #lifetime #mutability #ident2, #(#call_args),*);
-            assert_eq!(r1, r2);
-        }
-    }
-}
-
-/// Find the constructor of a struct, and use "kani::any()" as arguments to construct the struct.
-///
-/// Returns (init_code, constructor_name, call_args)
-fn construct(constructor: &CommonFunction) -> (TokenStream, TokenStream, TokenStream) {
-    let func_name = TokenStream::from_str(&constructor.name()).unwrap();
-    let inputs = &constructor.sig().inputs;
-
-    let mut init_code = Vec::new();
-    let mut call_args: Vec<TokenStream> = Vec::new();
-
-    for arg in inputs {
-        match arg {
-            FnArg::Receiver(_) => unreachable!("Constructor should not have receiver"),
-            FnArg::Typed(pat_type) => {
-                let arg_name = match &*pat_type.pat {
-                    syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
-                    _ => "arg".to_string(),
-                };
-                let arg_type = &pat_type.ty;
-                let mutability = match &*pat_type.pat {
-                    Pat::Ident(pat_ident) => pat_ident.mutability,
-                    _ => None,
-                };
-                let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
-                init_code.push(init_stmt);
-
-                let arg_ident = quote::format_ident!("{}", arg_name);
-                call_args.push(quote! { #arg_ident });
-            }
-        }
-    }
-
-    (
-        quote! {
-            #(#init_code)*
-        },
-        func_name,
-        quote! {
-            #(#call_args),*
-        },
-    )
-}
-
-/// Generate all free-standing functions
-fn generate_functions(functions: &[CommonFunction]) -> Vec<TokenStream> {
-    functions
-        .iter()
-        .map(|func| generate_function(func))
-        .collect()
-}
-
-/// Generate all methods
-fn generate_methods(
-    constructors: &BTreeMap<String, CommonFunction>,
-    methods: &[CommonFunction],
-) -> Vec<TokenStream> {
-    methods
-        .iter()
-        .map(|method| match constructors.get(method.name()) {
-            Some(constructor) => generate_method(constructor, method),
-            None => quote! {},
-        })
-        .collect()
-}
-
-/// Generate all import (`use`) statements
-fn generate_imports(functions: &[CommonFunction], methods: &[CommonFunction]) -> Vec<TokenStream> {
-    let mut mod1_imports = Vec::new();
-    let mut mod2_imports = Vec::new();
-
-    for fun in functions.iter().chain(methods.iter()) {
-        // To use a function in a trait, we need to import the trait
-        if let Some(impl_block) = &fun.f1.impl_block {
-            if let Some((_, path, _)) = &impl_block.trait_ {
-                let path = path
-                    .segments
-                    .iter()
-                    .map(|seg| seg.ident.clone())
-                    .collect::<Vec<_>>();
-                if !mod1_imports.contains(&path) {
-                    mod1_imports.push(path);
-                }
-            }
-        }
-        if let Some(impl_block) = &fun.f2.impl_block {
-            if let Some((_, path, _)) = &impl_block.trait_ {
-                let path = path
-                    .segments
-                    .iter()
-                    .map(|seg| seg.ident.clone())
-                    .collect::<Vec<_>>();
-                if !mod2_imports.contains(&path) {
-                    mod2_imports.push(path);
-                }
-            }
-        }
-    }
-
-    let mod1_import_stmts = mod1_imports.iter().map(|path| {
-        let ident = format_ident!("Mod1{}", path.last().unwrap());
-        quote! {
-            use mod1::#(#path)::* as #ident;
-        }
-    });
-    let mod2_import_stmts = mod2_imports.iter().map(|path| {
-        let ident = format_ident!("Mod2{}", path.last().unwrap());
-        quote! {
-            use mod2::#(#path)::* as #ident;
-        }
-    });
-
-    mod1_import_stmts.chain(mod2_import_stmts).collect()
 }
 
 const ARR_LIMIT: usize = 16;

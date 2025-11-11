@@ -19,7 +19,7 @@ use syn::FnArg;
 /// Differential fuzzing harness generator.
 pub struct HarnessGenerator {
     /// All functions used in the fuzzing process.
-    funcs: FunctionClassifier,
+    classifier: FunctionClassifier,
 }
 
 impl HarnessGenerator {
@@ -28,7 +28,7 @@ impl HarnessGenerator {
         let mut classifier = FunctionClassifier::classify(functions);
         classifier.remove_unused_constructors();
         classifier.remove_no_constructor_methods();
-        Self { funcs: classifier }
+        Self { classifier }
     }
 
     /// Collect a function's arguments into a struct.
@@ -71,7 +71,7 @@ impl HarnessGenerator {
     /// Generate Argument structs.
     fn generate_arg_structs(&self) -> TokenStream {
         let func_structs = self
-            .funcs
+            .classifier
             .functions
             .iter()
             .map(|func| self.generate_function_arg_struct(func))
@@ -79,8 +79,8 @@ impl HarnessGenerator {
 
         let mut method_structs = Vec::<TokenStream>::new();
         let mut used_constructors = Vec::<&CommonFunction>::new();
-        for method in &self.funcs.methods {
-            let constructor = self.funcs.constructors.get(&method.scope()).unwrap();
+        for method in &self.classifier.methods {
+            let constructor = self.classifier.constructors.get(&method.scope()).unwrap();
             method_structs.push(self.generate_method_arg_struct(method));
             if !used_constructors
                 .iter()
@@ -152,7 +152,7 @@ impl HarnessGenerator {
 
     /// Generate one test function for a method.
     fn generate_test_fn_for_method(&self, method: &CommonFunction) -> TokenStream {
-        let constructor = self.funcs.constructors.get(&method.scope()).unwrap();
+        let constructor = self.classifier.constructors.get(&method.scope()).unwrap();
 
         // Test function name
         let fn_name = format_ident!("test_{}", method.flat_name());
@@ -282,24 +282,24 @@ impl HarnessGenerator {
     fn generate_harness(&self) -> TokenStream {
         let args = self.generate_arg_structs();
         let test_functions = self
-            .funcs
+            .classifier
             .functions
             .iter()
             .map(|func| self.generate_test_fn_for_function(func))
             .collect::<Vec<_>>();
         let test_methods = self
-            .funcs
+            .classifier
             .methods
             .iter()
             .map(|method| self.generate_test_fn_for_method(method))
             .collect::<Vec<_>>();
         let test_fns = self
-            .funcs
+            .classifier
             .functions
             .iter()
             .map(|func| format!("test_{}", func.flat_name()))
             .chain(
-                self.funcs
+                self.classifier
                     .methods
                     .iter()
                     .map(|method| format!("test_{}", method.flat_name())),
@@ -331,11 +331,17 @@ impl DifferentialFuzzing {
         let generator = HarnessGenerator::new(checker.unchecked_funcs.clone());
         // Collect functions and methods that are checked in harness
         let functions = generator
-            .funcs
+            .classifier
             .functions
             .iter()
             .map(|f| f.name().to_owned())
-            .chain(generator.funcs.methods.iter().map(|f| f.name().to_owned()))
+            .chain(
+                generator
+                    .classifier
+                    .methods
+                    .iter()
+                    .map(|f| f.name().to_owned()),
+            )
             .collect::<Vec<_>>();
         let harness = generator.generate_harness();
         (functions, harness)
@@ -352,15 +358,15 @@ impl DifferentialFuzzing {
     }
 
     /// Run libAFL fuzzer and save the ouput in "df.tmp".
-    fn run_fuzzer(&self, fuzzer_path: &str) -> anyhow::Result<()> {
-        let tmp_file =
-            std::fs::File::create("df.tmp").map_err(|_| anyhow!("Failed to create tmp file"))?;
+    fn run_fuzzer(&self, fuzzer_path: &str, output_path: &str) -> anyhow::Result<()> {
+        let output_file =
+            std::fs::File::create(output_path).map_err(|_| anyhow!("Failed to create tmp file"))?;
         let cur_dir = std::env::current_dir().unwrap();
 
         let _ = std::env::set_current_dir(fuzzer_path);
         Command::new("cargo")
             .args(["run", "--release"])
-            .stdout(tmp_file)
+            .stdout(output_file)
             .stderr(std::fs::File::open("/dev/null").unwrap())
             .status()
             .map_err(|_| anyhow!("Failed to run kani"))?;
@@ -370,7 +376,7 @@ impl DifferentialFuzzing {
     }
 
     /// Analyze the fuzzer output and return the functions that are not checked.
-    fn analyze_fuzzer_output(&self, functions: &[String]) -> CheckResult {
+    fn analyze_fuzzer_output(&self, functions: &[String], output_path: &str) -> CheckResult {
         let mut res = CheckResult {
             status: Ok(()),
             ok: functions.to_vec(),
@@ -378,7 +384,7 @@ impl DifferentialFuzzing {
         };
 
         let re = Regex::new(r"MISMATCH:\s*(\S+)").unwrap();
-        let file = std::fs::File::open("df.tmp").unwrap();
+        let file = std::fs::File::open(output_path).unwrap();
         let reader = BufReader::new(file);
 
         for line in reader.lines() {
@@ -414,11 +420,12 @@ impl CheckStep for DifferentialFuzzing {
             return CheckResult::failed(e);
         }
 
-        let res = self.run_fuzzer(fuzzer_path);
+        let output_path = "df.tmp";
+        let res = self.run_fuzzer(fuzzer_path, output_path);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
 
-        self.analyze_fuzzer_output(&functions)
+        self.analyze_fuzzer_output(&functions, output_path)
     }
 }

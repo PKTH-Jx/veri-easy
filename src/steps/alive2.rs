@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::{io::BufRead, process::Command};
 
 use crate::{
     checker::{CheckResult, CheckStep, Checker},
@@ -21,52 +21,57 @@ impl Alive2 {
         Self { path }
     }
 
-    fn compile_to_llvm_ir(&self, src: &str, out: &str) -> anyhow::Result<()> {
+    fn compile_to_llvm_ir(&self, src_path: &str, output_path: &str) -> anyhow::Result<()> {
         let original =
-            std::fs::read_to_string(src).map_err(|_| anyhow!("Failed to read source"))?;
+            std::fs::read_to_string(src_path).map_err(|_| anyhow!("Failed to read source"))?;
+        // Add #[export_name = "..."] to all functions, save to tmp file
         let exported = export_functions(&original)?;
         let tmp_path = "tmp.rs";
         std::fs::write(&tmp_path, exported).map_err(|_| anyhow!("Failed to write tmp file"))?;
 
         Command::new("rustc")
-            .args(["--emit=llvm-ir", "--crate-type=lib", tmp_path, "-o", out])
+            .args([
+                "--emit=llvm-ir",
+                "--crate-type=lib",
+                tmp_path,
+                "-o",
+                output_path,
+            ])
             .stderr(std::fs::File::open("/dev/null").unwrap())
             .status()
             .map(|_| ())
             .map_err(|_| anyhow!("Failed to compile to llvm-ir"))?;
-
         std::fs::remove_file(tmp_path).map_err(|_| anyhow!("Failed to remove tmp file"))
     }
 
-    fn remove_llvm_ir(&self, path: &str) -> anyhow::Result<()> {
-        std::fs::remove_file(path).map_err(|_| anyhow!("Failed to remove llvm-ir"))
+    fn remove_llvm_ir(&self, ir_path: &str) -> anyhow::Result<()> {
+        std::fs::remove_file(ir_path).map_err(|_| anyhow!("Failed to remove llvm-ir"))
     }
 
-    fn run_alive2(&self, ir1: &str, ir2: &str) -> anyhow::Result<String> {
-        let tmp_path = "alive2.tmp";
-        let tmp_file =
-            std::fs::File::create(tmp_path).map_err(|_| anyhow!("Failed to create tmp file"))?;
+    fn run_alive2(&self, ir1: &str, ir2: &str, output_path: &str) -> anyhow::Result<()> {
+        let output_file =
+            std::fs::File::create(output_path).map_err(|_| anyhow!("Failed to create tmp file"))?;
         Command::new(self.path.clone())
             .args([ir1, ir2])
-            .stdout(tmp_file)
+            .stdout(output_file)
             .status()
-            .map_err(|_| anyhow!("Failed to run alive2"))?;
-        let output =
-            std::fs::read_to_string(tmp_path).map_err(|_| anyhow!("Failed to read tmp file"))?;
-        std::fs::remove_file(tmp_path).map_err(|_| anyhow!("Failed to remove tmp file"))?;
-        Ok(output)
+            .map_err(|_| anyhow!("Failed to run alive-tv"))?;
+        Ok(())
     }
 
-    fn analyze_alive2_output(&self, output: &str) -> CheckResult {
+    fn analyze_alive2_output(&self, output_path: &str) -> CheckResult {
         let mut res = CheckResult {
             status: Ok(()),
             ok: vec![],
             fail: vec![],
         };
 
+        let file = std::fs::File::open(output_path).unwrap();
+        let reader = std::io::BufReader::new(file);
         let mut func_name: Option<String> = None;
 
-        for line in output.lines() {
+        for line in reader.lines() {
+            let line = line.unwrap();
             if line.starts_with("define") {
                 if func_name.is_none() {
                     let at = line.find("@").unwrap();
@@ -106,12 +111,12 @@ impl CheckStep for Alive2 {
             return CheckResult::failed(e);
         }
 
-        let res = self.run_alive2(out1, out2);
+        let output_path = "alive2.tmp";
+        let res = self.run_alive2(out1, out2, output_path);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
-
-        let check_res = self.analyze_alive2_output(&res.unwrap());
+        let check_res = self.analyze_alive2_output(output_path);
 
         if let Err(e) = self.remove_llvm_ir(out1) {
             return CheckResult::failed(e);
