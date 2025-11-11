@@ -348,7 +348,7 @@ kani = "*"
     fn run_kani(&self, harness_path: &str, output_path: &str) -> anyhow::Result<()> {
         let output_file = std::fs::File::create(output_path)
             .map_err(|_| anyhow!("Failed to create output file"))?;
-        
+
         let cur_dir = std::env::current_dir().unwrap();
         let _ = std::env::set_current_dir(harness_path);
         Command::new("cargo")

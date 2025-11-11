@@ -1,4 +1,4 @@
-//! Differential Fuzzing step.
+//! Property-based testing step.
 
 use std::{
     io::{BufRead, BufReader, Write},
@@ -16,7 +16,7 @@ use quote::{format_ident, quote};
 use regex::Regex;
 use syn::FnArg;
 
-/// Differential fuzzing harness generator.
+/// Proptest harness generator.
 struct HarnessGenerator {
     /// All functions used in the fuzzing process.
     classifier: FunctionClassifier,
@@ -43,7 +43,8 @@ impl HarnessGenerator {
             }
         }
         quote! {
-            #[derive(Debug, serde::Deserialize)]
+            #[derive(Debug)]
+            #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
             pub struct #struct_name {
                 #(pub #fields),*
             }
@@ -109,13 +110,8 @@ impl HarnessGenerator {
         }
 
         quote! {
-            fn #fn_name(input: &[u8]) -> bool {
-                // Function arguments
-                let function_arg_struct = match postcard::from_bytes::<#function_arg_struct>(&input[..]) {
-                    Ok(args) => args,
-                    Err(_) => return true,
-                };
-
+            #[test]
+            fn #fn_name(function_arg_struct in any::<#function_arg_struct>()) {
                 // Function call
                 let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                     || mod1::#function_name_tk(#(function_arg_struct.#function_args),*))).map_err(|_| ());
@@ -127,7 +123,7 @@ impl HarnessGenerator {
                     println!("function: {:?}", function_arg_struct);
                     println!("r1 = {:?}, r2 = {:?}", r1, r2);
                 }
-                r1 == r2
+                assert(r1 == r2);
             }
         }
     }
@@ -192,30 +188,21 @@ impl HarnessGenerator {
         let reference = reference.map(|(and, _)| and);
 
         quote! {
-            fn #fn_name(input: &[u8]) -> bool {
-                // Constructor arguments
-                let (constr_arg_struct, remain) = match postcard::take_from_bytes::<#constructor_arg_struct>(
-                    &input[..]
-                ) {
-                    Ok((args, remain)) => (args, remain),
-                    Err(_) => return true,
-                };
-                // Method arguments
-                let method_arg_struct = match postcard::from_bytes::<#method_arg_struct>(&remain[..]) {
-                    Ok(args) => args,
-                    Err(_) => return true,
-                };
-
+            #[test]
+            fn #fn_name(
+                constr_arg_struct in any::<#constructor_arg_struct>(),
+                method_arg_struct in any::<#method_arg_struct>(),
+            ) {
                 // Construct s1 and s2
                 let mut s1 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                     || mod1::#constructor_name_tk(#(constr_arg_struct.#constructor_args),*))) {
                     Ok(s) => s,
-                    Err(_) => return true,
+                    Err(_) => return Ok(()),
                 };
                 let mut s2 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                     || mod2::#constructor_name_tk(#(constr_arg_struct.#constructor_args),*))) {
                     Ok(s) => s,
-                    Err(_) => return true,
+                    Err(_) => return Ok(()),
                 };
 
                 // Do method call
@@ -237,31 +224,8 @@ impl HarnessGenerator {
                     println!("r1 = {:?}, r2 = {:?}", r1, r2);
                     println!("s1 = {:?}, s2 = {:?}", s1.get_val(), s2.get_val());
                 }
-                r1 == r2 && s1.get_val() == s2.get_val()
-            }
-        }
-    }
-
-    // Generate test dispatch function
-    fn generate_dispatch_fn(&self, test_fns: &[String]) -> TokenStream {
-        let fn_count = test_fns.len();
-        let match_arms = test_fns.iter().enumerate().map(|(i, name)| {
-            let fn_name = format_ident!("{}", name);
-            let i = i as u8;
-            quote! {
-                #i => #fn_name(&input[1..]),
-            }
-        });
-        quote! {
-            pub fn run_harness(input: &[u8]) -> bool {
-                if input.len() == 0 {
-                    return true;
-                }
-                let fn_id = input[0] % #fn_count as u8;
-                match fn_id {
-                    #(#match_arms)*
-                    _ => true,
-                }
+                assert!(r1 == r2);
+                assert!(s1.get_val() == s2.get_val());
             }
         }
     }
@@ -335,40 +299,31 @@ impl HarnessGenerator {
             .iter()
             .map(|method| self.generate_test_fn_for_method(method))
             .collect::<Vec<_>>();
-        let test_fns = self
-            .classifier
-            .functions
-            .iter()
-            .map(|func| format!("test_{}", func.flat_name()))
-            .chain(
-                self.classifier
-                    .methods
-                    .iter()
-                    .map(|method| format!("test_{}", method.flat_name())),
-            )
-            .collect::<Vec<_>>();
-        let dispatch_fn = self.generate_dispatch_fn(&test_fns);
         let imports = self.generate_imports();
 
         quote! {
             mod mod1;
             mod mod2;
 
+            use proptest::prelude::*;
             use std::ops::Range;
             #(#imports)*
 
             #args
-            #(#test_functions)*
-            #(#test_methods)*
-            #dispatch_fn
+            proptest! {
+                #![proptest_config(ProptestConfig::with_cases(100000))]
+                #(#test_functions)*
+                #(#test_methods)*
+            }
+            fn main() {}
         }
     }
 }
 
-/// Differential Fuzzing step.
-pub struct DifferentialFuzzing;
+/// Property-based testing step using Proptest.
+pub struct PropertyBasedTesting;
 
-impl DifferentialFuzzing {
+impl PropertyBasedTesting {
     fn generate_harness_file(&self, checker: &Checker) -> (Vec<String>, TokenStream) {
         let generator = HarnessGenerator::new(checker.unchecked_funcs.clone());
         // Collect functions and methods that are checked in harness
@@ -389,14 +344,14 @@ impl DifferentialFuzzing {
         (functions, harness)
     }
 
-    /// Create a cargo project for LibAFL harness.
+    /// Create a cargo project for proptest harness.
     ///
     /// Dir structure:
     ///
     /// harness_path
     /// ├── Cargo.toml
     /// └── src
-    ///     ├── lib.rs
+    ///     ├── main.rs
     ///     ├── mod1.rs
     ///     └── mod2.rs
     fn create_harness_project(
@@ -406,7 +361,7 @@ impl DifferentialFuzzing {
         harness_path: &str,
     ) -> anyhow::Result<()> {
         Command::new("cargo")
-            .args(["new", "--lib", "--vcs", "none", harness_path])
+            .args(["new", "--bin", "--vcs", "none", harness_path])
             .status()?;
 
         // Write rust files
@@ -418,7 +373,7 @@ impl DifferentialFuzzing {
             .unwrap()
             .write_all(checker.src2.content.as_bytes())
             .map_err(|_| anyhow!("Failed to write mod2 file"))?;
-        std::fs::File::create(harness_path.to_owned() + "/src/lib.rs")
+        std::fs::File::create(harness_path.to_owned() + "/src/main.rs")
             .unwrap()
             .write_all(harness.to_string().as_bytes())
             .map_err(|_| anyhow!("Failed to write harness file"))?;
@@ -434,8 +389,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-serde = "*"
-postcard = "*"
+proptest = "1.9"
+proptest-derive = "0.2.0"
 "#
                 .as_bytes(),
             )
@@ -454,25 +409,25 @@ postcard = "*"
     }
 
     /// Run libAFL fuzzer and save the ouput in "df.tmp".
-    fn run_fuzzer(&self, fuzzer_path: &str, output_path: &str) -> anyhow::Result<()> {
+    fn run_test(&self, harness_path: &str, output_path: &str) -> anyhow::Result<()> {
         let output_file =
             std::fs::File::create(output_path).map_err(|_| anyhow!("Failed to create tmp file"))?;
 
         let cur_dir = std::env::current_dir().unwrap();
-        let _ = std::env::set_current_dir(fuzzer_path);
+        let _ = std::env::set_current_dir(harness_path);
         Command::new("cargo")
-            .args(["run", "--release"])
+            .args(["test"])
             .stdout(output_file)
             .stderr(std::fs::File::open("/dev/null").unwrap())
             .status()
-            .map_err(|_| anyhow!("Failed to run kani"))?;
+            .map_err(|_| anyhow!("Failed to run proptest"))?;
         let _ = std::env::set_current_dir(cur_dir);
 
         Ok(())
     }
 
     /// Analyze the fuzzer output and return the functions that are not checked.
-    fn analyze_fuzzer_output(&self, functions: &[String], output_path: &str) -> CheckResult {
+    fn analyze_pbt_output(&self, functions: &[String], output_path: &str) -> CheckResult {
         let mut res = CheckResult {
             status: Ok(()),
             ok: functions.to_vec(),
@@ -503,19 +458,17 @@ postcard = "*"
     }
 }
 
-impl CheckStep for DifferentialFuzzing {
+impl CheckStep for PropertyBasedTesting {
     fn name(&self) -> &str {
-        "Differential Fuzzing"
+        "Property-Based Testing"
     }
 
     fn note(&self) -> Option<&str> {
-        Some("Using differential fuzzing to find inconsistencies.")
+        Some("Uses Proptest to generate inputs and compare function behaviors.")
     }
 
     fn run(&self, checker: &Checker) -> CheckResult {
-        let harness_path = "/Users/jingx/Dev/playground/fuzz/harness";
-        let fuzzer_path = "/Users/jingx/Dev/playground/fuzz";
-
+        let harness_path = "pbt_harness";
         let (functions, harness) = self.generate_harness_file(checker);
 
         let res = self.create_harness_project(checker, harness, harness_path);
@@ -523,16 +476,16 @@ impl CheckStep for DifferentialFuzzing {
             return CheckResult::failed(e);
         }
 
-        let output_path = "df.tmp";
-        let res = self.run_fuzzer(fuzzer_path, output_path);
+        let output_path = "pbt.tmp";
+        let res = self.run_test(harness_path, output_path);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
-        let check_res = self.analyze_fuzzer_output(&functions, output_path);
+        let check_res = self.analyze_pbt_output(&functions, output_path);
 
-        if let Err(e) = self.remove_harness_project(harness_path) {
-            return CheckResult::failed(e);
-        }
+        // if let Err(e) = self.remove_harness_project(harness_path) {
+        //     return CheckResult::failed(e);
+        // }
 
         check_res
     }

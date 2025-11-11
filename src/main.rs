@@ -1,7 +1,7 @@
 use crate::{
     checker::{CheckStep, Checker},
     source::Source,
-    steps::{Alive2, DifferentialFuzzing, Identical, Kani},
+    steps::{Alive2, DifferentialFuzzing, Identical, Kani, PropertyBasedTesting},
 };
 
 mod checker;
@@ -15,8 +15,9 @@ fn main() -> anyhow::Result<()> {
     let s2 = Source::new("b.rs")?;
     let steps: Vec<Box<dyn CheckStep>> = vec![
         Box::new(Identical),
-        Box::new(DifferentialFuzzing),
         // Box::new(Kani),
+        // Box::new(DifferentialFuzzing),
+        Box::new(PropertyBasedTesting),
         // Box::new(Alive2::new(
         //     "/Users/jingx/Dev/os/verif/cmpir/alive2/build/alive-tv".to_owned(),
         // )),
