@@ -17,7 +17,7 @@ use regex::Regex;
 use syn::FnArg;
 
 /// Differential fuzzing harness generator.
-pub struct HarnessGenerator {
+struct HarnessGenerator {
     /// All functions used in the fuzzing process.
     classifier: FunctionClassifier,
 }
@@ -278,6 +278,60 @@ impl HarnessGenerator {
         }
     }
 
+    /// Generate all import (`use`) statements
+    fn generate_imports(&self) -> Vec<TokenStream> {
+        let mut mod1_imports = Vec::new();
+        let mut mod2_imports = Vec::new();
+
+        for func in self
+            .classifier
+            .functions
+            .iter()
+            .chain(self.classifier.methods.iter())
+        {
+            // To use a function in a trait, we need to import the trait
+            if let Some(impl_block) = &func.f1.impl_block {
+                if let Some((_, path, _)) = &impl_block.trait_ {
+                    let path = path
+                        .segments
+                        .iter()
+                        .map(|seg| seg.ident.clone())
+                        .collect::<Vec<_>>();
+                    if !mod1_imports.contains(&path) {
+                        mod1_imports.push(path);
+                    }
+                }
+            }
+            if let Some(impl_block) = &func.f2.impl_block {
+                if let Some((_, path, _)) = &impl_block.trait_ {
+                    let path = path
+                        .segments
+                        .iter()
+                        .map(|seg| seg.ident.clone())
+                        .collect::<Vec<_>>();
+                    if !mod2_imports.contains(&path) {
+                        mod2_imports.push(path);
+                    }
+                }
+            }
+        }
+
+        let mod1_import_stmts = mod1_imports.iter().map(|path| {
+            let ident = format_ident!("Mod1{}", path.last().unwrap());
+            quote! {
+                use mod1::#(#path)::* as #ident;
+            }
+        });
+        let mod2_import_stmts = mod2_imports.iter().map(|path| {
+            let ident = format_ident!("Mod2{}", path.last().unwrap());
+            quote! {
+                use mod2::#(#path)::* as #ident;
+            }
+        });
+
+        mod1_import_stmts.chain(mod2_import_stmts).collect()
+    }
+
     // Generate harness main file
     fn generate_harness(&self) -> TokenStream {
         let args = self.generate_arg_structs();
@@ -306,14 +360,14 @@ impl HarnessGenerator {
             )
             .collect::<Vec<_>>();
         let dispatch_fn = self.generate_dispatch_fn(&test_fns);
+        let imports = self.generate_imports();
 
         quote! {
-            use std::ops::Range;
-            use mod1::BitAlloc as Mod1BitAlloc;
-            use mod2::{BitAlloc as Mod2BitAlloc, BitAllocView as Mod2BitAllocView};
-
             mod mod1;
             mod mod2;
+            
+            use std::ops::Range;
+            #(#imports)*
 
             #args
             #(#test_functions)*
@@ -347,13 +401,67 @@ impl DifferentialFuzzing {
         (functions, harness)
     }
 
-    fn write_harness_file(&self, harness: TokenStream, harness_path: &str) -> anyhow::Result<()> {
-        let _ = std::fs::File::create(harness_path)
+    /// Create a cargo project for LibAFL harness.
+    ///
+    /// Dir structure:
+    ///
+    /// harness_path
+    /// ├── Cargo.toml
+    /// └── src
+    ///     ├── lib.rs
+    ///     ├── mod1.rs
+    ///     └── mod2.rs
+    fn create_harness_project(
+        &self,
+        checker: &Checker,
+        harness: TokenStream,
+        harness_path: &str,
+    ) -> anyhow::Result<()> {
+        Command::new("cargo")
+            .args(["new", "--lib", "--vcs", "none", harness_path])
+            .status()?;
+
+        // Write rust files
+        std::fs::File::create(harness_path.to_owned() + "/src/mod1.rs")
             .unwrap()
-            .write_all(harness.to_string().as_bytes());
-        let _ = Command::new("rustfmt")
-            .args([harness_path, "--unstable-features", "--skip-children"])
-            .status();
+            .write_all(checker.src1.content.as_bytes())
+            .map_err(|_| anyhow!("Failed to write mod1 file"))?;
+        std::fs::File::create(harness_path.to_owned() + "/src/mod2.rs")
+            .unwrap()
+            .write_all(checker.src2.content.as_bytes())
+            .map_err(|_| anyhow!("Failed to write mod2 file"))?;
+        std::fs::File::create(harness_path.to_owned() + "/src/lib.rs")
+            .unwrap()
+            .write_all(harness.to_string().as_bytes())
+            .map_err(|_| anyhow!("Failed to write harness file"))?;
+
+        // Write Cargo.toml
+        std::fs::File::create(harness_path.to_owned() + "/Cargo.toml")
+            .unwrap()
+            .write_all(
+                r#"
+[package]
+name = "harness"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = "*"
+postcard = "*"
+"#
+                .as_bytes(),
+            )
+            .map_err(|_| anyhow!("Failed to write Cargo.toml"))?;
+
+        // Cargo fmt
+        let cur_dir = std::env::current_dir().unwrap();
+        let _ = std::env::set_current_dir(harness_path);
+        Command::new("cargo")
+            .args(["fmt"])
+            .status()
+            .map_err(|_| anyhow!("Failed to run cargo fmt"))?;
+        let _ = std::env::set_current_dir(cur_dir);
+
         Ok(())
     }
 
@@ -361,8 +469,8 @@ impl DifferentialFuzzing {
     fn run_fuzzer(&self, fuzzer_path: &str, output_path: &str) -> anyhow::Result<()> {
         let output_file =
             std::fs::File::create(output_path).map_err(|_| anyhow!("Failed to create tmp file"))?;
+            
         let cur_dir = std::env::current_dir().unwrap();
-
         let _ = std::env::set_current_dir(fuzzer_path);
         Command::new("cargo")
             .args(["run", "--release"])
@@ -398,6 +506,13 @@ impl DifferentialFuzzing {
 
         res
     }
+
+    /// Remove the harness project.
+    fn remove_harness_project(&self, harness_path: &str) -> anyhow::Result<()> {
+        std::fs::remove_dir_all(harness_path)
+            .map_err(|_| anyhow!("Failed to remove harness file"))?;
+        Ok(())
+    }
 }
 
 impl CheckStep for DifferentialFuzzing {
@@ -410,12 +525,12 @@ impl CheckStep for DifferentialFuzzing {
     }
 
     fn run(&self, checker: &Checker) -> CheckResult {
-        let harness_path = "/Users/jingx/Dev/playground/fuzz/harness/src/lib.rs";
+        let harness_path = "/Users/jingx/Dev/playground/fuzz/harness";
         let fuzzer_path = "/Users/jingx/Dev/playground/fuzz";
 
         let (functions, harness) = self.generate_harness_file(checker);
 
-        let res = self.write_harness_file(harness, harness_path);
+        let res = self.create_harness_project(checker, harness, harness_path);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
@@ -425,7 +540,12 @@ impl CheckStep for DifferentialFuzzing {
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
+        let check_res = self.analyze_fuzzer_output(&functions, output_path);
 
-        self.analyze_fuzzer_output(&functions, output_path)
+        if let Err(e) = self.remove_harness_project(harness_path) {
+            return CheckResult::failed(e);
+        }
+
+        check_res
     }
 }

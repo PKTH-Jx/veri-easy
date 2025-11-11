@@ -3,7 +3,6 @@
 use anyhow::anyhow;
 use regex::Regex;
 use std::{
-    collections::BTreeMap,
     io::{BufRead, Write},
     process::Command,
     str::FromStr,
@@ -91,7 +90,7 @@ impl HarnessGenerator {
 
         let mut reference = None;
         let mut mutability = None;
-        let (init, constructor, args) = self.construct(method.name());
+        let (init, constructor, args) = self.construct(&method.scope());
 
         for arg in inputs {
             match arg {
@@ -141,8 +140,8 @@ impl HarnessGenerator {
     /// Find the constructor of a struct, and use "kani::any()" as arguments to construct the struct.
     ///
     /// Returns (init_code, constructor_name, call_args)
-    fn construct(&self, method_name: &str) -> (TokenStream, TokenStream, TokenStream) {
-        let constructor = self.classifier.constructors.get(method_name).unwrap();
+    fn construct(&self, struct_name: &str) -> (TokenStream, TokenStream, TokenStream) {
+        let constructor = self.classifier.constructors.get(struct_name).unwrap();
         let name = TokenStream::from_str(constructor.name()).unwrap();
         let inputs = &constructor.sig().inputs;
 
@@ -334,12 +333,13 @@ kani = "*"
             .map_err(|_| anyhow!("Failed to write Cargo.toml"))?;
 
         // Cargo fmt
+        let cur_dir = std::env::current_dir().unwrap();
         let _ = std::env::set_current_dir(harness_path);
         Command::new("cargo")
             .args(["fmt"])
             .status()
             .map_err(|_| anyhow!("Failed to run cargo fmt"))?;
-        let _ = std::env::set_current_dir("..");
+        let _ = std::env::set_current_dir(cur_dir);
 
         Ok(())
     }
@@ -348,8 +348,8 @@ kani = "*"
     fn run_kani(&self, harness_path: &str, output_path: &str) -> anyhow::Result<()> {
         let output_file = std::fs::File::create(output_path)
             .map_err(|_| anyhow!("Failed to create output file"))?;
+        
         let cur_dir = std::env::current_dir().unwrap();
-
         let _ = std::env::set_current_dir(harness_path);
         Command::new("cargo")
             .args(["kani", "-Z", "unstable-options", "--harness-timeout", "10s"])
