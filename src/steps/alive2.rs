@@ -1,13 +1,15 @@
+//! Alive2 step: use alive-tv to check function equivalence.
+
+use anyhow::{Result, anyhow};
 use std::{io::BufRead, process::Command};
+use syn::{
+    Attribute, File, ImplItemFn, ItemFn, ItemImpl,
+    visit_mut::{self, VisitMut},
+};
 
 use crate::{
     checker::{CheckResult, CheckStep, Checker},
     function::type_to_string,
-};
-use anyhow::{Result, anyhow};
-use syn::{
-    Attribute, File, ImplItemFn, ItemFn, ItemImpl,
-    visit_mut::{self, VisitMut},
 };
 
 /// Alive2 step: use alive-tv to check function equivalence.

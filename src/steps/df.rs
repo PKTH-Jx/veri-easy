@@ -1,5 +1,9 @@
 //! Differential Fuzzing step.
 
+use anyhow::anyhow;
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote};
+use regex::Regex;
 use std::{
     io::{BufRead, BufReader, Write},
     process::Command,
@@ -9,104 +13,30 @@ use std::{
 use crate::{
     checker::{CheckResult, CheckStep, Checker},
     function::{CommonFunction, FunctionClassifier},
+    generator::{HarnessBackend, HarnessGenerator},
 };
-use anyhow::anyhow;
-use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
-use regex::Regex;
-use syn::FnArg;
 
-/// Differential fuzzing harness generator.
-struct HarnessGenerator {
-    /// All functions used in the fuzzing process.
-    classifier: FunctionClassifier,
-}
+/// Differential fuzzing harness generator backend.
+struct DFHarnessBackend;
 
-impl HarnessGenerator {
-    /// Create a new DifferentialFuzzing step.
-    pub fn new(functions: Vec<CommonFunction>) -> Self {
-        let mut classifier = FunctionClassifier::classify(functions);
-        classifier.remove_unused_constructors();
-        classifier.remove_no_constructor_methods();
-        Self { classifier }
-    }
-
-    /// Collect a function's arguments into a struct.
-    fn generate_arg_struct(&self, func: &CommonFunction) -> TokenStream {
-        let struct_name = format_ident!("Args{}", func.flat_name());
-        let mut fields = Vec::<TokenStream>::new();
-        for arg in &func.sig().inputs {
-            if matches!(arg, FnArg::Typed(_)) {
-                fields.push(quote! {
-                    #arg
-                });
-            }
-        }
+impl HarnessBackend for DFHarnessBackend {
+    fn arg_struct_attrs() -> TokenStream {
         quote! {
             #[derive(Debug, serde::Deserialize)]
-            pub struct #struct_name {
-                #(pub #fields),*
-            }
         }
     }
 
-    /// Generate argument structs.
-    fn generate_arg_structs(&self) -> TokenStream {
-        let func_structs = self
-            .classifier
-            .functions
-            .iter()
-            .map(|func| self.generate_arg_struct(func))
-            .collect::<Vec<_>>();
-
-        let mut method_structs = Vec::<TokenStream>::new();
-        let mut used_constructors = Vec::<&CommonFunction>::new();
-        for method in &self.classifier.methods {
-            let constructor = self.classifier.constructors.get(&method.scope()).unwrap();
-            method_structs.push(self.generate_arg_struct(method));
-            if !used_constructors
-                .iter()
-                .any(|c| c.name() == constructor.name())
-            {
-                used_constructors.push(&constructor);
-            }
-        }
-
-        let constructor_structs = used_constructors
-            .iter()
-            .map(|func| self.generate_arg_struct(func))
-            .collect::<Vec<_>>();
-
-        quote! {
-            #(#func_structs)*
-            #(#method_structs)*
-            #(#constructor_structs)*
-        }
-    }
-
-    /// Generate one test function for a function.
-    fn generate_test_fn_for_function(&self, function: &CommonFunction) -> TokenStream {
+    fn make_harness_for_function(
+        function: &CommonFunction,
+        function_args: &[TokenStream],
+    ) -> TokenStream {
         // Test function name
-        let fn_name = format_ident!("test_{}", function.flat_name());
+        let fn_name = format_ident!("check_{}", function.flat_name());
         // Function name
         let function_name = function.name();
         let function_name_tk = TokenStream::from_str(function_name).unwrap();
-
         // Function argument struct name
         let function_arg_struct = format_ident!("Args{}", function.flat_name());
-
-        // Function call arguments
-        let mut function_args = Vec::<TokenStream>::new();
-        for arg in &function.sig().inputs {
-            if let FnArg::Typed(pat_type) = arg {
-                let arg_name = match &*pat_type.pat {
-                    syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
-                    _ => "arg".to_string(),
-                };
-                let arg_ident = quote::format_ident!("{}", arg_name);
-                function_args.push(quote! { #arg_ident.clone() });
-            }
-        }
 
         quote! {
             fn #fn_name(input: &[u8]) -> bool {
@@ -132,12 +62,15 @@ impl HarnessGenerator {
         }
     }
 
-    /// Generate one test function for a method.
-    fn generate_test_fn_for_method(&self, method: &CommonFunction) -> TokenStream {
-        let constructor = self.classifier.constructors.get(&method.scope()).unwrap();
-
+    fn make_harness_for_method(
+        method: &CommonFunction,
+        constructor: &CommonFunction,
+        method_args: &[TokenStream],
+        constructor_args: &[TokenStream],
+        receiver_prefix: TokenStream,
+    ) -> TokenStream {
         // Test function name
-        let fn_name = format_ident!("test_{}", method.flat_name());
+        let fn_name = format_ident!("check_{}", method.flat_name());
         // Constructor name
         let constructor_name = constructor.name();
         let constructor_name_tk = TokenStream::from_str(constructor_name).unwrap();
@@ -149,43 +82,6 @@ impl HarnessGenerator {
         let method_arg_struct = format_ident!("Args{}", method.flat_name());
         // Constructor argument struct name
         let constructor_arg_struct = format_ident!("Args{}", constructor.flat_name());
-
-        // Constructor call arguments
-        let mut constructor_args = Vec::<TokenStream>::new();
-        for arg in &constructor.sig().inputs {
-            if let FnArg::Typed(pat_type) = arg {
-                let arg_name = match &*pat_type.pat {
-                    syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
-                    _ => "arg".to_string(),
-                };
-                let arg_ident = quote::format_ident!("{}", arg_name);
-                constructor_args.push(quote! { #arg_ident.clone() });
-            } else {
-                unreachable!("Constructor should not have receiver.");
-            }
-        }
-
-        // Method call arguments
-        let mut reference = None;
-        let mut mutability = None;
-        let mut method_args = Vec::<TokenStream>::new();
-        for arg in &method.sig().inputs {
-            match arg {
-                FnArg::Receiver(receiver) => {
-                    mutability = receiver.mutability.clone();
-                    reference = receiver.reference.clone();
-                }
-                FnArg::Typed(pat_type) => {
-                    let arg_name = match &*pat_type.pat {
-                        syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
-                        _ => "arg".to_string(),
-                    };
-                    let arg_ident = quote::format_ident!("{}", arg_name);
-                    method_args.push(quote! { #arg_ident.clone() });
-                }
-            }
-        }
-        let reference = reference.map(|(and, _)| and);
 
         quote! {
             fn #fn_name(input: &[u8]) -> bool {
@@ -217,12 +113,12 @@ impl HarnessGenerator {
                 // Do method call
                 let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || mod1::#method_name_tk(
-                            #reference #mutability s1, #(method_arg_struct.#method_args),*
+                            #receiver_prefix s1, #(method_arg_struct.#method_args),*
                         )
                     )).map_err(|_| ());
                 let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || mod2::#method_name_tk(
-                            #reference #mutability s2, #(method_arg_struct.#method_args),*
+                            #receiver_prefix s2, #(method_arg_struct.#method_args),*
                         )
                     )).map_err(|_| ());
 
@@ -238,8 +134,20 @@ impl HarnessGenerator {
         }
     }
 
-    // Generate test dispatch function
-    fn generate_dispatch_fn(&self, test_fns: &[String]) -> TokenStream {
+    fn additional_code(classifier: &FunctionClassifier) -> TokenStream {
+        // Generate dispatch function as additional code
+        let test_fns = classifier
+            .functions
+            .iter()
+            .map(|func| format!("check_{}", func.flat_name()))
+            .chain(
+                classifier
+                    .methods
+                    .iter()
+                    .map(|method| format!("check_{}", method.flat_name())),
+            )
+            .collect::<Vec<_>>();
+
         let fn_count = test_fns.len();
         let match_arms = test_fns.iter().enumerate().map(|(i, name)| {
             let fn_name = format_ident!("{}", name);
@@ -262,90 +170,13 @@ impl HarnessGenerator {
         }
     }
 
-    /// Generate all import (`use`) statements
-    fn generate_imports(&self) -> Vec<TokenStream> {
-        let mut mod1_imports = Vec::new();
-        let mut mod2_imports = Vec::new();
-
-        for func in self
-            .classifier
-            .functions
-            .iter()
-            .chain(self.classifier.methods.iter())
-        {
-            // To use a function in a trait, we need to import the trait
-            if let Some(impl_block) = &func.f1.impl_block {
-                if let Some((_, path, _)) = &impl_block.trait_ {
-                    let path = path
-                        .segments
-                        .iter()
-                        .map(|seg| seg.ident.clone())
-                        .collect::<Vec<_>>();
-                    if !mod1_imports.contains(&path) {
-                        mod1_imports.push(path);
-                    }
-                }
-            }
-            if let Some(impl_block) = &func.f2.impl_block {
-                if let Some((_, path, _)) = &impl_block.trait_ {
-                    let path = path
-                        .segments
-                        .iter()
-                        .map(|seg| seg.ident.clone())
-                        .collect::<Vec<_>>();
-                    if !mod2_imports.contains(&path) {
-                        mod2_imports.push(path);
-                    }
-                }
-            }
-        }
-
-        let mod1_import_stmts = mod1_imports.iter().map(|path| {
-            let ident = format_ident!("Mod1{}", path.last().unwrap());
-            quote! {
-                use mod1::#(#path)::* as #ident;
-            }
-        });
-        let mod2_import_stmts = mod2_imports.iter().map(|path| {
-            let ident = format_ident!("Mod2{}", path.last().unwrap());
-            quote! {
-                use mod2::#(#path)::* as #ident;
-            }
-        });
-
-        mod1_import_stmts.chain(mod2_import_stmts).collect()
-    }
-
-    // Generate harness main file
-    fn generate_harness(&self) -> TokenStream {
-        let args = self.generate_arg_structs();
-        let test_functions = self
-            .classifier
-            .functions
-            .iter()
-            .map(|func| self.generate_test_fn_for_function(func))
-            .collect::<Vec<_>>();
-        let test_methods = self
-            .classifier
-            .methods
-            .iter()
-            .map(|method| self.generate_test_fn_for_method(method))
-            .collect::<Vec<_>>();
-        let test_fns = self
-            .classifier
-            .functions
-            .iter()
-            .map(|func| format!("test_{}", func.flat_name()))
-            .chain(
-                self.classifier
-                    .methods
-                    .iter()
-                    .map(|method| format!("test_{}", method.flat_name())),
-            )
-            .collect::<Vec<_>>();
-        let dispatch_fn = self.generate_dispatch_fn(&test_fns);
-        let imports = self.generate_imports();
-
+    fn finalize(
+        imports: Vec<TokenStream>,
+        args_structs: Vec<TokenStream>,
+        functions: Vec<TokenStream>,
+        methods: Vec<TokenStream>,
+        additional: TokenStream,
+    ) -> TokenStream {
         quote! {
             mod mod1;
             mod mod2;
@@ -353,20 +184,23 @@ impl HarnessGenerator {
             use std::ops::Range;
             #(#imports)*
 
-            #args
-            #(#test_functions)*
-            #(#test_methods)*
-            #dispatch_fn
+            #(#args_structs)*
+            #(#functions)*
+            #(#methods)*
+            #additional
         }
     }
 }
+
+/// Differential fuzzing harness generator.
+type DFHarnessGenerator = HarnessGenerator<DFHarnessBackend>;
 
 /// Differential Fuzzing step.
 pub struct DifferentialFuzzing;
 
 impl DifferentialFuzzing {
     fn generate_harness_file(&self, checker: &Checker) -> (Vec<String>, TokenStream) {
-        let generator = HarnessGenerator::new(checker.unchecked_funcs.clone());
+        let generator = DFHarnessGenerator::new(checker.unchecked_funcs.clone());
         // Collect functions and methods that are checked in harness
         let functions = generator
             .classifier

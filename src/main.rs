@@ -6,6 +6,7 @@ use crate::{
 
 mod checker;
 mod function;
+mod generator;
 mod source;
 mod steps;
 
