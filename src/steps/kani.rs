@@ -10,10 +10,7 @@ use std::{
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{
-    FnArg, Pat, Path, Receiver, Type, TypeArray, TypePath, TypePtr, TypeReference, TypeSlice,
-    TypeTuple, token::Mut,
-};
+use syn::FnArg;
 
 use crate::{
     checker::{CheckResult, CheckStep, Checker},
@@ -35,33 +32,80 @@ impl HarnessGenerator {
         Self { classifier }
     }
 
+    /// Collect a function's arguments into a struct.
+    fn generate_arg_struct(&self, func: &CommonFunction) -> TokenStream {
+        let struct_name = format_ident!("Args{}", func.flat_name());
+        let mut fields = Vec::<TokenStream>::new();
+        for arg in &func.sig().inputs {
+            if matches!(arg, FnArg::Typed(_)) {
+                fields.push(quote! {
+                    #arg
+                });
+            }
+        }
+        quote! {
+            #[derive(Debug, kani::Arbitrary)]
+            pub struct #struct_name {
+                #(pub #fields),*
+            }
+        }
+    }
+
+    /// Generate argument structs.
+    fn generate_arg_structs(&self) -> TokenStream {
+        let func_structs = self
+            .classifier
+            .functions
+            .iter()
+            .map(|func| self.generate_arg_struct(func))
+            .collect::<Vec<_>>();
+
+        let mut method_structs = Vec::<TokenStream>::new();
+        let mut used_constructors = Vec::<&CommonFunction>::new();
+        for method in &self.classifier.methods {
+            let constructor = self.classifier.constructors.get(&method.scope()).unwrap();
+            method_structs.push(self.generate_arg_struct(method));
+            if !used_constructors
+                .iter()
+                .any(|c| c.name() == constructor.name())
+            {
+                used_constructors.push(&constructor);
+            }
+        }
+
+        let constructor_structs = used_constructors
+            .iter()
+            .map(|func| self.generate_arg_struct(func))
+            .collect::<Vec<_>>();
+
+        quote! {
+            #(#func_structs)*
+            #(#method_structs)*
+            #(#constructor_structs)*
+        }
+    }
+
     /// Generate one Kani harness for comparing two free-standing functions.
     fn generate_function(&self, func: &CommonFunction) -> TokenStream {
-        let harness_name = quote::format_ident!("check___{}", func.flat_name());
-        let func_name = TokenStream::from_str(&func.name()).unwrap();
-        let inputs = &func.sig().inputs;
+        // Test function name
+        let fn_name = format_ident!("check_{}", func.flat_name());
+        // Function name
+        let function_name = func.name();
+        let function_name_tk = TokenStream::from_str(function_name).unwrap();
 
-        let mut harness_body = Vec::new();
-        let mut call_args: Vec<proc_macro2::TokenStream> = Vec::new();
+        // Function argument struct name
+        let function_arg_struct = format_ident!("Args{}", func.flat_name());
 
-        for arg in inputs {
+        // Function call arguments
+        let mut function_args = Vec::<TokenStream>::new();
+        for arg in &func.sig().inputs {
             if let FnArg::Typed(pat_type) = arg {
                 let arg_name = match &*pat_type.pat {
                     syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
                     _ => "arg".to_string(),
                 };
-                let arg_type = &pat_type.ty;
-                let mutability = match &*pat_type.pat {
-                    Pat::Ident(pat_ident) => pat_ident.mutability,
-                    _ => None,
-                };
-                let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
-                harness_body.push(init_stmt);
-
                 let arg_ident = quote::format_ident!("{}", arg_name);
-                call_args.push(quote! { #arg_ident.clone() });
-            } else {
-                unreachable!("Free-standing function should not have receiver.");
+                function_args.push(quote! { #arg_ident.clone() });
             }
         }
 
@@ -69,55 +113,66 @@ impl HarnessGenerator {
             #[cfg(kani)]
             #[kani::proof]
             #[allow(non_snake_case)]
-            pub fn #harness_name() {
-                #(#harness_body)*
-
-                let r1 = mod1::#func_name(#(#call_args),*);
-                let r2 = mod2::#func_name(#(#call_args),*);
-                assert_eq!(r1, r2);
+            pub fn #fn_name() {
+                let function_arg_struct = kani::any::<#function_arg_struct>();
+                // Function call
+                let r1 = mod1::#function_name_tk(#(function_arg_struct.#function_args),*);
+                let r2 = mod2::#function_name_tk(#(function_arg_struct.#function_args),*);
+                assert!(r1 == r2);
             }
         }
     }
 
     /// Generate one Kani harness for comparing two methods.
     fn generate_method(&self, method: &CommonFunction) -> TokenStream {
-        let harness_name = quote::format_ident!("check___{}", method.flat_name());
-        let func_name = TokenStream::from_str(method.name()).unwrap();
-        let inputs = &method.sig().inputs;
+        let constructor = self.classifier.constructors.get(&method.scope()).unwrap();
 
-        let mut harness_body = Vec::new();
-        let mut call_args: Vec<TokenStream> = Vec::new();
+        // Test function name
+        let fn_name = format_ident!("check_{}", method.flat_name());
+        // Constructor name
+        let constructor_name = constructor.name();
+        let constructor_name_tk = TokenStream::from_str(constructor_name).unwrap();
+        // Method name
+        let method_name = method.name();
+        let method_name_tk = TokenStream::from_str(method_name).unwrap();
 
+        // Method argument struct name
+        let method_arg_struct = format_ident!("Args{}", method.flat_name());
+        // Constructor argument struct name
+        let constructor_arg_struct = format_ident!("Args{}", constructor.flat_name());
+
+        // Constructor call arguments
+        let mut constructor_args = Vec::<TokenStream>::new();
+        for arg in &constructor.sig().inputs {
+            if let FnArg::Typed(pat_type) = arg {
+                let arg_name = match &*pat_type.pat {
+                    syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
+                    _ => "arg".to_string(),
+                };
+                let arg_ident = quote::format_ident!("{}", arg_name);
+                constructor_args.push(quote! { #arg_ident.clone() });
+            } else {
+                unreachable!("Constructor should not have receiver.");
+            }
+        }
+
+        // Method call arguments
         let mut reference = None;
         let mut mutability = None;
-        let (init, constructor, args) = self.construct(&method.scope());
-
-        for arg in inputs {
+        let mut method_args = Vec::<TokenStream>::new();
+        for arg in &method.sig().inputs {
             match arg {
                 FnArg::Receiver(receiver) => {
                     mutability = receiver.mutability.clone();
                     reference = receiver.reference.clone();
-                    let construct_stmt = quote! {
-                        #init
-                        let #mutability s1 = mod1::#constructor(#args);
-                        let #mutability s2 = mod2::#constructor(#args);
-                    };
-                    harness_body.push(construct_stmt);
                 }
                 FnArg::Typed(pat_type) => {
                     let arg_name = match &*pat_type.pat {
                         syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
                         _ => "arg".to_string(),
                     };
-                    let arg_type = &pat_type.ty;
-                    let mutability = match &*pat_type.pat {
-                        Pat::Ident(pat_ident) => pat_ident.mutability,
-                        _ => None,
-                    };
-                    let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
-                    harness_body.push(init_stmt);
                     let arg_ident = quote::format_ident!("{}", arg_name);
-                    call_args.push(quote! { #arg_ident.clone() });
+                    method_args.push(quote! { #arg_ident.clone() });
                 }
             }
         }
@@ -127,58 +182,21 @@ impl HarnessGenerator {
             #[cfg(kani)]
             #[kani::proof]
             #[allow(non_snake_case)]
-            pub fn #harness_name() {
-                #(#harness_body)*
+            pub fn #fn_name() {
+                let constr_arg_struct = kani::any::<#constructor_arg_struct>();
+                // Construct s1 and s2
+                let mut s1 = mod1::#constructor_name_tk(#(constr_arg_struct.#constructor_args),*);
+                let mut s2 = mod2::#constructor_name_tk(#(constr_arg_struct.#constructor_args),*);
 
-                let r1 = mod1::#func_name(#reference #mutability s1, #(#call_args),*);
-                let r2 = mod2::#func_name(#reference #mutability s2, #(#call_args),*);
-                assert_eq!(r1, r2);
+                let method_arg_struct = kani::any::<#method_arg_struct>();
+                // Do method call
+                let r1 = mod1::#method_name_tk(#reference #mutability s1, #(method_arg_struct.#method_args),*);
+                let r2 = mod2::#method_name_tk(#reference #mutability s2, #(method_arg_struct.#method_args),*);
+
+                assert!(r1 == r2);
+                assert!(s1.get_val() == s2.get_val());
             }
         }
-    }
-
-    /// Find the constructor of a struct, and use "kani::any()" as arguments to construct the struct.
-    ///
-    /// Returns (init_code, constructor_name, call_args)
-    fn construct(&self, struct_name: &str) -> (TokenStream, TokenStream, TokenStream) {
-        let constructor = self.classifier.constructors.get(struct_name).unwrap();
-        let name = TokenStream::from_str(constructor.name()).unwrap();
-        let inputs = &constructor.sig().inputs;
-
-        let mut init_code = Vec::new();
-        let mut call_args: Vec<TokenStream> = Vec::new();
-
-        for arg in inputs {
-            match arg {
-                FnArg::Receiver(_) => unreachable!("Constructor should not have receiver"),
-                FnArg::Typed(pat_type) => {
-                    let arg_name = match &*pat_type.pat {
-                        syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
-                        _ => "arg".to_string(),
-                    };
-                    let arg_type = &pat_type.ty;
-                    let mutability = match &*pat_type.pat {
-                        Pat::Ident(pat_ident) => pat_ident.mutability,
-                        _ => None,
-                    };
-                    let init_stmt = arg_type.init_for_type(&arg_name, &mutability);
-                    init_code.push(init_stmt);
-
-                    let arg_ident = quote::format_ident!("{}", arg_name);
-                    call_args.push(quote! { #arg_ident });
-                }
-            }
-        }
-
-        (
-            quote! {
-                #(#init_code)*
-            },
-            name,
-            quote! {
-                #(#call_args),*
-            },
-        )
     }
 
     /// Generate all free-standing functions
@@ -255,6 +273,7 @@ impl HarnessGenerator {
 
     /// Generate harness file
     fn generate_harness(&self) -> TokenStream {
+        let args = self.generate_arg_structs();
         let functions = self.generate_functions();
         let methods = self.generate_methods();
         let imports = self.generate_imports();
@@ -264,6 +283,7 @@ impl HarnessGenerator {
             mod mod1;
             mod mod2;
 
+            #args
             #(#imports)*
             #(#functions)*
             #(#methods)*
@@ -318,13 +338,15 @@ impl Kani {
             .map_err(|_| anyhow!("Failed to write harness file"))?;
 
         // Write Cargo.toml
-        std::fs::OpenOptions::new()
-            .append(true)
-            .write(true)
-            .open(harness_path.to_owned() + "/Cargo.toml")
+        std::fs::File::create(harness_path.to_owned() + "/Cargo.toml")
             .unwrap()
-            .write(
+            .write_all(
                 r#"
+[package]
+name = "harness"
+version = "0.1.0"
+edition = "2024"
+
 [dev-dependencies]
 kani = "*"
 "#
@@ -369,7 +391,7 @@ kani = "*"
             fail: vec![],
         };
 
-        let re = Regex::new(r"Checking harness check___([0-9a-zA-Z_]+)\.").unwrap();
+        let re = Regex::new(r"Checking harness check_([0-9a-zA-Z_]+)\.").unwrap();
         let file = std::fs::File::open(output_path).unwrap();
         let reader = std::io::BufReader::new(file);
         let mut func_name: Option<String> = None;
@@ -391,8 +413,8 @@ kani = "*"
 
     /// Remove the harness project.
     fn remove_harness_project(&self, harness_path: &str) -> anyhow::Result<()> {
-        std::fs::remove_dir_all(harness_path)
-            .map_err(|_| anyhow!("Failed to remove harness file"))?;
+        // std::fs::remove_dir_all(harness_path)
+        //     .map_err(|_| anyhow!("Failed to remove harness file"))?;
         Ok(())
     }
 }
@@ -427,249 +449,5 @@ impl CheckStep for Kani {
         }
 
         check_res
-    }
-}
-
-const ARR_LIMIT: usize = 16;
-
-/// Any type implement ArbitraryInit trait can generate an init statement for itself
-trait ArbitraryInit {
-    /// Generate an init statement for the given type
-    fn init_for_type(&self, arg_name: &str, mutability: &Option<Mut>) -> TokenStream;
-}
-
-fn error_msg(msg: &str) -> proc_macro2::TokenStream {
-    quote! {
-        compile_error!(#msg);
-    }
-}
-
-impl ArbitraryInit for Receiver {
-    fn init_for_type(&self, arg_name: &str, mutability: &Option<Mut>) -> proc_macro2::TokenStream {
-        let arg_ident = quote::format_ident!("{}", arg_name);
-        let to_ref = match self.reference {
-            Some(_) => quote! { let #arg_ident = &#mutability #arg_ident; },
-            None => quote!(),
-        };
-        let init_stmt = quote! {
-            let #mutability #arg_ident: Self = kani::any();
-            #to_ref
-        };
-        init_stmt
-    }
-}
-
-impl ArbitraryInit for TypePath {
-    fn init_for_type(&self, arg_name: &str, mutability: &Option<Mut>) -> proc_macro2::TokenStream {
-        // TODO: support Enum types
-        let arg_ident = quote::format_ident!("{}", arg_name);
-        if self.path.is_ident("u32") || self.path.is_ident("u64") || self.path.is_ident("usize") {
-            quote! {
-                let #mutability #arg_ident: #self = kani::any();
-                kani::assume(#arg_ident < 10000);
-            }
-        } else if self.path.is_ident("i32") || self.path.is_ident("i64") {
-            quote! {
-                let #mutability #arg_ident: #self = kani::any();
-                kani::assume(#arg_ident < 10000 && #arg_ident > -10000);
-            }
-        } else if self.path.is_ident("String") || self.path.is_ident("str") {
-            init_for_string(arg_name, mutability)
-        } else if self.path.segments.last().is_some() {
-            let final_seg = self.path.segments.last().unwrap();
-            let inner_type = &final_seg.arguments;
-            // TODO: support more types, e.g., HashMap, HashSet, etc.
-            if final_seg.ident == "Vec" {
-                let vec_type = inner_type.clone();
-                match vec_type {
-                    syn::PathArguments::AngleBracketed(args) => {
-                        if let Some(syn::GenericArgument::Type(ty)) = args.args.first() {
-                            quote! {
-                                let #mutability #arg_ident: #self = kani::vec::any_vec::<#ty, #ARR_LIMIT>();
-                            }
-                        } else {
-                            error_msg("Unsupported Vec Type")
-                        }
-                    }
-                    _ => error_msg("Unsupported Vec Pattern"),
-                }
-            } else if final_seg.ident == "Option" {
-                let option_type = inner_type.clone();
-                match option_type {
-                    syn::PathArguments::AngleBracketed(args) => {
-                        if let Some(syn::GenericArgument::Type(ty)) = args.args.first() {
-                            let init_stmt = ty.init_for_type(arg_name, mutability);
-                            quote! {
-                                let #mutability #arg_ident: #self = if kani::any::<bool>() {
-                                    #init_stmt
-                                    Some(#arg_ident)
-                                } else {
-                                    None
-                                };
-                            }
-                        } else {
-                            error_msg("Unsupported Option Type")
-                        }
-                    }
-                    _ => error_msg("Unsupported Option Pattern"),
-                }
-            } else if final_seg.ident == "Result" {
-                let result_type = inner_type.clone();
-                match result_type {
-                    syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
-                        args,
-                        ..
-                    }) => {
-                        let ok_init = match args.first() {
-                            Some(syn::GenericArgument::Type(ty)) => {
-                                ty.init_for_type(arg_name, mutability)
-                            }
-                            _ => error_msg("Unsupported Result Type"),
-                        };
-                        let err_init = match args.last() {
-                            Some(syn::GenericArgument::Type(ty)) => {
-                                ty.init_for_type(arg_name, mutability)
-                            }
-                            _ => error_msg("Unsupported Result Type"),
-                        };
-                        quote! {
-                            let #mutability #arg_ident: #self = if kani::any::<bool>() {
-                                #ok_init
-                                Ok(#arg_ident)
-                            } else {
-                                #err_init
-                                Err(#arg_ident)
-                            };
-                        }
-                    }
-                    _ => error_msg("Unsupported Result Pattern"),
-                }
-            } else if final_seg.ident == "Range" {
-                let range_type = inner_type.clone();
-                match range_type {
-                    syn::PathArguments::AngleBracketed(args) => {
-                        if let Some(syn::GenericArgument::Type(ty)) = args.args.first() {
-                            quote! {
-                                let #mutability #arg_ident: #self = kani::any::<Range<#ty>>();
-                            }
-                        } else {
-                            error_msg("Unsupported Range Type")
-                        }
-                    }
-                    _ => error_msg("Unsupported Range Pattern"),
-                }
-            } else {
-                // both typical types and user-defined structs are handled here
-                let final_ident = &final_seg.ident;
-                quote! {
-                    let #mutability #arg_ident: #final_ident = kani::any();
-                }
-            }
-        } else {
-            error_msg("Failed to get the final segment of the path.")
-        }
-    }
-}
-
-fn init_for_string(arg_name: &str, mutability: &Option<Mut>) -> proc_macro2::TokenStream {
-    const STRING_LIMIT: usize = 8;
-    let arg_ident = quote::format_ident!("{}", arg_name);
-    let arr_name = quote::format_ident!("{}_arr", arg_ident);
-    quote! {
-        let #arr_name = kani::any::<[char; #STRING_LIMIT]>();
-        let #mutability #arg_ident = String::from_iter(#arr_name);
-    }
-}
-
-impl ArbitraryInit for TypeArray {
-    fn init_for_type(&self, arg_name: &str, mutability: &Option<Mut>) -> proc_macro2::TokenStream {
-        let arr_type = &self.elem;
-        let arr_len = &self.len;
-        let arg_ident = quote::format_ident!("{}", arg_name);
-        quote! {
-            let #mutability #arg_ident = kani::any::<[#arr_type; #arr_len]>();
-        }
-    }
-}
-
-impl ArbitraryInit for TypeSlice {
-    fn init_for_type(&self, arg_name: &str, mutability: &Option<Mut>) -> proc_macro2::TokenStream {
-        let slice_type = &self.elem;
-        let arg_ident = quote::format_ident!("{}", arg_name);
-        quote! {
-            let #mutability #arg_ident = kani::any::<[#slice_type; #ARR_LIMIT]>();
-        }
-    }
-}
-
-impl ArbitraryInit for TypeReference {
-    fn init_for_type(&self, arg_name: &str, _mutability: &Option<Mut>) -> proc_macro2::TokenStream {
-        let obj_name = quote::format_ident!("{}_obj", arg_name);
-        let arg_ident = quote::format_ident!("{}", arg_name);
-        let mutability = self.mutability;
-        let obj_init = self.elem.init_for_type(&obj_name.to_string(), &mutability);
-        match self.elem.as_ref() {
-            Type::Slice(_) => {
-                let slice_method = match mutability {
-                    Some(_) => "kani::slice::any_slice_of_array_mut",
-                    None => "kani::slice::any_slice_of_array",
-                };
-                let slice_method = syn::parse_str::<Path>(slice_method).unwrap();
-                quote! {
-                    #obj_init
-                    let #arg_ident = #slice_method(&#mutability #obj_name);
-                }
-            }
-            _ => quote! {
-                #obj_init
-                let #arg_ident = &#mutability #obj_name;
-            },
-        }
-    }
-}
-
-impl ArbitraryInit for TypePtr {
-    fn init_for_type(&self, arg_name: &str, _mutability: &Option<Mut>) -> proc_macro2::TokenStream {
-        let arg_ident = quote::format_ident!("{}", arg_name);
-        let mutability = self.mutability;
-        let const_token = self.const_token;
-        let elem = &self.elem;
-        quote! {
-            let mut generator = kani::PointerGenerator::<{if std::mem::size_of::<#elem>() > 0 {std::mem::size_of::<#elem>()} else {1}}>::new();
-            let #arg_ident: *#const_token #mutability #elem = generator.any_alloc_status().ptr;
-        }
-    }
-}
-
-impl ArbitraryInit for Type {
-    fn init_for_type(&self, arg_name: &str, mutability: &Option<Mut>) -> proc_macro2::TokenStream {
-        match self {
-            Type::Path(type_path) => type_path.init_for_type(arg_name, mutability),
-            Type::Array(type_arr) => type_arr.init_for_type(arg_name, mutability),
-            Type::Slice(type_slice) => type_slice.init_for_type(arg_name, mutability),
-            Type::Tuple(type_tuple) => type_tuple.init_for_type(arg_name, mutability),
-            Type::Reference(type_ref) => type_ref.init_for_type(arg_name, mutability),
-            Type::Ptr(type_ptr) => type_ptr.init_for_type(arg_name, mutability),
-            _ => error_msg("Unsupported argument type"),
-        }
-    }
-}
-
-impl ArbitraryInit for TypeTuple {
-    fn init_for_type(&self, arg_name: &str, mutability: &Option<Mut>) -> proc_macro2::TokenStream {
-        let tuple_elems = self.elems.iter().map(|elem| {
-            let elem_name = quote::format_ident!("{}_elem", arg_name);
-            let elem_init = elem.init_for_type(&elem_name.to_string(), mutability);
-            quote! {
-                {
-                    #elem_init
-                    #elem_name
-                }
-            }
-        });
-        let arg_ident = quote::format_ident!("{}", arg_name);
-        quote! {
-            let #mutability #arg_ident = (#(#tuple_elems),*);
-        }
     }
 }

@@ -32,10 +32,10 @@ impl HarnessGenerator {
     }
 
     /// Collect a function's arguments into a struct.
-    fn generate_arg_struct(&self, method: &CommonFunction) -> TokenStream {
-        let struct_name = format_ident!("Args{}", method.flat_name());
+    fn generate_arg_struct(&self, func: &CommonFunction) -> TokenStream {
+        let struct_name = format_ident!("Args{}", func.flat_name());
         let mut fields = Vec::<TokenStream>::new();
-        for arg in &method.sig().inputs {
+        for arg in &func.sig().inputs {
             if matches!(arg, FnArg::Typed(_)) {
                 fields.push(quote! {
                     #arg
@@ -185,10 +185,6 @@ impl HarnessGenerator {
                 }
             }
         }
-        let lifetime = match &reference {
-            Some((_, lt)) => lt.clone(),
-            None => None,
-        };
         let reference = reference.map(|(and, _)| and);
 
         quote! {
@@ -221,12 +217,12 @@ impl HarnessGenerator {
                 // Do method call
                 let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || mod1::#method_name_tk(
-                            #reference #lifetime #mutability s1, #(method_arg_struct.#method_args),*
+                            #reference #mutability s1, #(method_arg_struct.#method_args),*
                         )
                     )).map_err(|_| ());
                 let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || mod2::#method_name_tk(
-                            #reference #lifetime #mutability s2, #(method_arg_struct.#method_args),*
+                            #reference #mutability s2, #(method_arg_struct.#method_args),*
                         )
                     )).map_err(|_| ());
 
