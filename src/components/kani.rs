@@ -7,13 +7,12 @@ use regex::Regex;
 use std::{
     io::{BufRead, Write},
     process::Command,
-    str::FromStr,
 };
 
 use crate::{
-    checker::{CheckResult, CheckStep, Checker},
-    function::CommonFunction,
-    generator::{HarnessBackend, HarnessGenerator},
+    check::{CheckResult, Checker, Component},
+    defs::{CommonFunction, Path},
+    generate::{HarnessBackend, HarnessGenerator},
 };
 
 /// Kani harness generator backend.
@@ -30,23 +29,22 @@ impl HarnessBackend for KaniHarnessBackend {
         function: &CommonFunction,
         function_args: &[TokenStream],
     ) -> TokenStream {
+        let fn_name = &function.metadata.name;
+        
         // Test function name
-        let fn_name = format_ident!("check_{}", function.flat_name());
-        // Function name
-        let function_name = function.name();
-        let function_name_tk = TokenStream::from_str(function_name).unwrap();
+        let test_fn_name = format_ident!("check_{}", fn_name.to_ident());
         // Function argument struct name
-        let function_arg_struct = format_ident!("Args{}", function.flat_name());
+        let function_arg_struct = format_ident!("Args{}", fn_name.to_ident());
 
         quote! {
             #[cfg(kani)]
             #[kani::proof]
             #[allow(non_snake_case)]
-            pub fn #fn_name() {
+            pub fn #test_fn_name() {
                 let function_arg_struct = kani::any::<#function_arg_struct>();
                 // Function call
-                let r1 = mod1::#function_name_tk(#(function_arg_struct.#function_args),*);
-                let r2 = mod2::#function_name_tk(#(function_arg_struct.#function_args),*);
+                let r1 = mod1::#fn_name(#(function_arg_struct.#function_args),*);
+                let r2 = mod2::#fn_name(#(function_arg_struct.#function_args),*);
                 assert!(r1 == r2);
             }
         }
@@ -59,34 +57,30 @@ impl HarnessBackend for KaniHarnessBackend {
         constructor_args: &[TokenStream],
         receiver_prefix: TokenStream,
     ) -> TokenStream {
+        let fn_name = &method.metadata.name;
+        let constr_name = &constructor.metadata.name;
+        
         // Test function name
-        let fn_name = format_ident!("check_{}", method.flat_name());
-        // Constructor name
-        let constructor_name = constructor.name();
-        let constructor_name_tk = TokenStream::from_str(constructor_name).unwrap();
-        // Method name
-        let method_name = method.name();
-        let method_name_tk = TokenStream::from_str(method_name).unwrap();
-
+        let test_fn_name = format_ident!("check_{}", fn_name.to_ident());
         // Method argument struct name
-        let method_arg_struct = format_ident!("Args{}", method.flat_name());
+        let method_arg_struct = format_ident!("Args{}", fn_name.to_ident());
         // Constructor argument struct name
-        let constructor_arg_struct = format_ident!("Args{}", constructor.flat_name());
+        let constructor_arg_struct = format_ident!("Args{}", constr_name.to_ident());
 
         quote! {
             #[cfg(kani)]
             #[kani::proof]
             #[allow(non_snake_case)]
-            pub fn #fn_name() {
+            pub fn #test_fn_name() {
                 let constr_arg_struct = kani::any::<#constructor_arg_struct>();
                 // Construct s1 and s2
-                let mut s1 = mod1::#constructor_name_tk(#(constr_arg_struct.#constructor_args),*);
-                let mut s2 = mod2::#constructor_name_tk(#(constr_arg_struct.#constructor_args),*);
+                let mut s1 = mod1::#constr_name(#(constr_arg_struct.#constructor_args),*);
+                let mut s2 = mod2::#constr_name(#(constr_arg_struct.#constructor_args),*);
 
                 let method_arg_struct = kani::any::<#method_arg_struct>();
                 // Do method call
-                let r1 = mod1::#method_name_tk(#receiver_prefix s1, #(method_arg_struct.#method_args),*);
-                let r2 = mod2::#method_name_tk(#receiver_prefix s2, #(method_arg_struct.#method_args),*);
+                let r1 = mod1::#fn_name(#receiver_prefix s1, #(method_arg_struct.#method_args),*);
+                let r2 = mod2::#fn_name(#receiver_prefix s2, #(method_arg_struct.#method_args),*);
 
                 assert!(r1 == r2);
                 assert!(s1.get_val() == s2.get_val());
@@ -102,6 +96,9 @@ impl HarnessBackend for KaniHarnessBackend {
         _additional: TokenStream,
     ) -> TokenStream {
         quote! {
+            #![allow(unused)]
+            #![allow(non_snake_case)]
+            #![allow(non_camel_case_types)]
             use std::ops::Range;
             mod mod1;
             mod mod2;
@@ -125,7 +122,11 @@ pub struct Kani;
 impl Kani {
     /// Generate harness code for Kani.
     fn generate_harness(&self, checker: &Checker) -> TokenStream {
-        let generator = KaniHarnessGenerator::new(checker.unchecked_funcs.clone());
+        let generator = KaniHarnessGenerator::new(
+            checker.unchecked_funcs.clone(),
+            checker.src1.symbols.clone(),
+            checker.src2.symbols.clone(),
+        );
         generator.generate_harness()
     }
 
@@ -228,7 +229,7 @@ kani = "*"
                 func_name = Some(caps[1].replace("___", "::"));
             }
             if line.contains("VERIFICATION:- SUCCESSFUL") && func_name.is_some() {
-                res.ok.push(func_name.take().unwrap());
+                res.ok.push(Path::from_str(&func_name.take().unwrap()));
             } else if line.contains("VERIFICATION:- FAILED") && func_name.is_some() {
                 func_name = None;
             }
@@ -245,9 +246,13 @@ kani = "*"
     }
 }
 
-impl CheckStep for Kani {
+impl Component for Kani {
     fn name(&self) -> &str {
         "Kani"
+    }
+
+    fn is_formal(&self) -> bool {
+        true
     }
 
     fn note(&self) -> Option<&str> {

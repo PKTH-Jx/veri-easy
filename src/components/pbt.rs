@@ -7,13 +7,12 @@ use regex::Regex;
 use std::{
     io::{BufRead, BufReader, Write},
     process::Command,
-    str::FromStr,
 };
 
 use crate::{
-    checker::{CheckResult, CheckStep, Checker},
-    function::CommonFunction,
-    generator::{HarnessBackend, HarnessGenerator},
+    check::{CheckResult, Checker, Component},
+    defs::{CommonFunction, Path},
+    generate::{HarnessBackend, HarnessGenerator},
 };
 
 /// PBT harness generator backend.
@@ -31,25 +30,29 @@ impl HarnessBackend for PBTHarnessBackend {
         function: &CommonFunction,
         function_args: &[TokenStream],
     ) -> TokenStream {
+        let fn_name = &function.metadata.name;
+        let fn_name_string = fn_name.to_string();
+
         // Test function name
-        let fn_name = format_ident!("check_{}", function.flat_name());
-        // Function name
-        let function_name = function.name();
-        let function_name_tk = TokenStream::from_str(function_name).unwrap();
+        let test_fn_name = format_ident!("check_{}", fn_name.to_ident());
         // Function argument struct name
-        let function_arg_struct = format_ident!("Args{}", function.flat_name());
+        let function_arg_struct = format_ident!("Args{}", fn_name.to_ident());
 
         quote! {
             #[test]
-            fn #fn_name(function_args in any::<#function_arg_struct>()) {
+            fn #test_fn_name(function_args in any::<#function_arg_struct>()) {
                 // Function call
-                let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || mod1::#function_name_tk(#(function_arg_struct.#function_args),*))).map_err(|_| ());
-                let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || mod2::#function_name_tk(#(function_arg_struct.#function_args),*))).map_err(|_| ());
+                let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mod1::#fn_name(#(function_arg_struct.#function_args),*)
+                }))
+                .map_err(|_| ());
+                let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mod2::#fn_name(#(function_arg_struct.#function_args),*)
+                }))
+                .map_err(|_| ());
 
                 if r1 != r2 {
-                    println!("MISMATCH {}", #function_name);
+                    println!("MISMATCH {}", #fn_name_string);
                     println!("function: {:?}", function_arg_struct);
                     println!("r1 = {:?}, r2 = {:?}", r1, r2);
                 }
@@ -65,52 +68,52 @@ impl HarnessBackend for PBTHarnessBackend {
         constructor_args: &[TokenStream],
         receiver_prefix: TokenStream,
     ) -> TokenStream {
+        let fn_name = &method.metadata.name;
+        let constr_name = &constructor.metadata.name;
+        let fn_name_string = fn_name.to_string();
+
         // Test function name
-        let fn_name = format_ident!("check_{}", method.flat_name());
-        // Constructor name
-        let constructor_name = constructor.name();
-        let constructor_name_tk = TokenStream::from_str(constructor_name).unwrap();
-        // Method name
-        let method_name = method.name();
-        let method_name_tk = TokenStream::from_str(method_name).unwrap();
-
+        let test_fn_name = format_ident!("check_{}", fn_name.to_ident());
         // Method argument struct name
-        let method_arg_struct = format_ident!("Args{}", method.flat_name());
+        let method_arg_struct = format_ident!("Args{}", fn_name.to_ident());
         // Constructor argument struct name
-        let constructor_arg_struct = format_ident!("Args{}", constructor.flat_name());
-
+        let constructor_arg_struct = format_ident!("Args{}", constr_name.to_ident());
         quote! {
             #[test]
-            fn #fn_name(
+            fn #test_fn_name(
                 constr_arg_struct in any::<#constructor_arg_struct>(),
                 method_arg_struct in any::<#method_arg_struct>(),
             ) {
                 // Construct s1 and s2
-                let mut s1 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || mod1::#constructor_name_tk(#(constr_arg_struct.#constructor_args),*))) {
+                let mut s1 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mod1::#constr_name(#(constr_arg_struct.#constructor_args),*)
+                })) {
                     Ok(s) => s,
                     Err(_) => return Ok(()),
                 };
-                let mut s2 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || mod2::#constructor_name_tk(#(constr_arg_struct.#constructor_args),*))) {
+                let mut s2 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mod2::#constr_name(#(constr_arg_struct.#constructor_args),*)
+                })) {
                     Ok(s) => s,
                     Err(_) => return Ok(()),
                 };
 
-                // Do method call
-                let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                        || mod1::#method_name_tk(
-                            #receiver_prefix s1, #(method_arg_struct.#method_args),*
-                        )
-                    )).map_err(|_| ());
-                let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                        || mod2::#method_name_tk(
-                            #receiver_prefix s2, #(method_arg_struct.#method_args),*
-                        )
-                    )).map_err(|_| ());
+                // Method call
+                let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mod1::#fn_name(
+                        #receiver_prefix s1, #(method_arg_struct.#method_args),*
+                    )
+                }))
+                .map_err(|_| ());
+                let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mod2::#fn_name(
+                        #receiver_prefix s2, #(method_arg_struct.#method_args),*
+                    )
+                }))
+                .map_err(|_| ());
 
                 if r1 != r2 || s1.get_val() != s2.get_val() {
-                    println!("MISMATCH: {}", #method_name);
+                    println!("MISMATCH: {}", #fn_name_string);
                     println!("contructor: {:?}", constr_arg_struct);
                     println!("method: {:?}", method_arg_struct);
                     println!("r1 = {:?}, r2 = {:?}", r1, r2);
@@ -155,20 +158,24 @@ type PBTHarnessGenerator = HarnessGenerator<PBTHarnessBackend>;
 pub struct PropertyBasedTesting;
 
 impl PropertyBasedTesting {
-    fn generate_harness_file(&self, checker: &Checker) -> (Vec<String>, TokenStream) {
-        let generator = PBTHarnessGenerator::new(checker.unchecked_funcs.clone());
+    fn generate_harness_file(&self, checker: &Checker) -> (Vec<Path>, TokenStream) {
+        let generator = PBTHarnessGenerator::new(
+            checker.unchecked_funcs.clone(),
+            checker.src1.symbols.clone(),
+            checker.src2.symbols.clone(),
+        );
         // Collect functions and methods that are checked in harness
         let functions = generator
             .classifier
             .functions
             .iter()
-            .map(|f| f.name().to_owned())
+            .map(|f| f.metadata.name.clone())
             .chain(
                 generator
                     .classifier
                     .methods
                     .iter()
-                    .map(|f| f.name().to_owned()),
+                    .map(|f| f.metadata.name.clone()),
             )
             .collect::<Vec<_>>();
         let harness = generator.generate_harness();
@@ -258,7 +265,7 @@ proptest-derive = "0.2.0"
     }
 
     /// Analyze the fuzzer output and return the functions that are not checked.
-    fn analyze_pbt_output(&self, functions: &[String], output_path: &str) -> CheckResult {
+    fn analyze_pbt_output(&self, functions: &[Path], output_path: &str) -> CheckResult {
         let mut res = CheckResult {
             status: Ok(()),
             ok: functions.to_vec(),
@@ -272,7 +279,7 @@ proptest-derive = "0.2.0"
         for line in reader.lines() {
             if let Some(caps) = re.captures(&line.unwrap()) {
                 let func_name = caps[1].to_string();
-                if let Some(i) = res.ok.iter().position(|f| *f == func_name) {
+                if let Some(i) = res.ok.iter().position(|f| f.to_string() == func_name) {
                     res.ok.swap_remove(i);
                 }
             }
@@ -289,9 +296,13 @@ proptest-derive = "0.2.0"
     }
 }
 
-impl CheckStep for PropertyBasedTesting {
+impl Component for PropertyBasedTesting {
     fn name(&self) -> &str {
         "Property-Based Testing"
+    }
+
+    fn is_formal(&self) -> bool {
+        false
     }
 
     fn note(&self) -> Option<&str> {

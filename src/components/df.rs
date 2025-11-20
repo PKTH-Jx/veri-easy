@@ -7,13 +7,12 @@ use regex::Regex;
 use std::{
     io::{BufRead, BufReader, Write},
     process::Command,
-    str::FromStr,
 };
 
 use crate::{
-    checker::{CheckResult, CheckStep, Checker},
-    function::{CommonFunction, FunctionClassifier},
-    generator::{HarnessBackend, HarnessGenerator},
+    check::{CheckResult, Checker, Component},
+    defs::{CommonFunction, Path},
+    generate::{FunctionClassifier, HarnessBackend, HarnessGenerator},
 };
 
 /// Differential fuzzing harness generator backend.
@@ -30,16 +29,16 @@ impl HarnessBackend for DFHarnessBackend {
         function: &CommonFunction,
         function_args: &[TokenStream],
     ) -> TokenStream {
+        let fn_name = &function.metadata.name;
+        let fn_name_string = fn_name.to_string();
+
         // Test function name
-        let fn_name = format_ident!("check_{}", function.flat_name());
-        // Function name
-        let function_name = function.name();
-        let function_name_tk = TokenStream::from_str(function_name).unwrap();
+        let test_fn_name = format_ident!("check_{}", fn_name.to_ident());
         // Function argument struct name
-        let function_arg_struct = format_ident!("Args{}", function.flat_name());
+        let function_arg_struct = format_ident!("Args{}", fn_name.to_ident());
 
         quote! {
-            fn #fn_name(input: &[u8]) -> bool {
+            fn #test_fn_name(input: &[u8]) -> bool {
                 // Function arguments
                 let function_arg_struct = match postcard::from_bytes::<#function_arg_struct>(&input[..]) {
                     Ok(args) => args,
@@ -47,13 +46,17 @@ impl HarnessBackend for DFHarnessBackend {
                 };
 
                 // Function call
-                let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || mod1::#function_name_tk(#(function_arg_struct.#function_args),*))).map_err(|_| ());
-                let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || mod2::#function_name_tk(#(function_arg_struct.#function_args),*))).map_err(|_| ());
+                let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mod1::#fn_name(#(function_arg_struct.#function_args),*)
+                }))
+                .map_err(|_| ());
+                let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mod2::#fn_name(#(function_arg_struct.#function_args),*)
+                }))
+                .map_err(|_| ());
 
                 if r1 != r2 {
-                    println!("MISMATCH {}", #function_name);
+                    println!("MISMATCH {}", #fn_name_string);
                     println!("function: {:?}", function_arg_struct);
                     println!("r1 = {:?}, r2 = {:?}", r1, r2);
                 }
@@ -69,22 +72,19 @@ impl HarnessBackend for DFHarnessBackend {
         constructor_args: &[TokenStream],
         receiver_prefix: TokenStream,
     ) -> TokenStream {
+        let fn_name = &method.metadata.name;
+        let fn_name_string = fn_name.to_string();
+        let constr_name = &constructor.metadata.name;
+        
         // Test function name
-        let fn_name = format_ident!("check_{}", method.flat_name());
-        // Constructor name
-        let constructor_name = constructor.name();
-        let constructor_name_tk = TokenStream::from_str(constructor_name).unwrap();
-        // Method name
-        let method_name = method.name();
-        let method_name_tk = TokenStream::from_str(method_name).unwrap();
-
+        let test_fn_name = format_ident!("check_{}", fn_name.to_ident());
         // Method argument struct name
-        let method_arg_struct = format_ident!("Args{}", method.flat_name());
+        let method_arg_struct = format_ident!("Args{}", fn_name.to_ident());
         // Constructor argument struct name
-        let constructor_arg_struct = format_ident!("Args{}", constructor.flat_name());
+        let constructor_arg_struct = format_ident!("Args{}", constr_name.to_ident());
 
         quote! {
-            fn #fn_name(input: &[u8]) -> bool {
+            fn #test_fn_name(input: &[u8]) -> bool {
                 // Constructor arguments
                 let (constr_arg_struct, remain) = match postcard::take_from_bytes::<#constructor_arg_struct>(
                     &input[..]
@@ -99,31 +99,35 @@ impl HarnessBackend for DFHarnessBackend {
                 };
 
                 // Construct s1 and s2
-                let mut s1 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || mod1::#constructor_name_tk(#(constr_arg_struct.#constructor_args),*))) {
+                let mut s1 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mod1::#constr_name(#(constr_arg_struct.#constructor_args),*)
+                })) {
                     Ok(s) => s,
                     Err(_) => return true,
                 };
-                let mut s2 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || mod2::#constructor_name_tk(#(constr_arg_struct.#constructor_args),*))) {
+                let mut s2 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mod2::#constr_name(#(constr_arg_struct.#constructor_args),*)
+                })) {
                     Ok(s) => s,
                     Err(_) => return true,
                 };
 
                 // Do method call
-                let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                        || mod1::#method_name_tk(
-                            #receiver_prefix s1, #(method_arg_struct.#method_args),*
-                        )
-                    )).map_err(|_| ());
-                let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                        || mod2::#method_name_tk(
-                            #receiver_prefix s2, #(method_arg_struct.#method_args),*
-                        )
-                    )).map_err(|_| ());
+                let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mod1::#fn_name(
+                        #receiver_prefix s1, #(method_arg_struct.#method_args),*
+                    )
+                }))
+                .map_err(|_| ());
+                let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mod2::#fn_name(
+                        #receiver_prefix s2, #(method_arg_struct.#method_args),*
+                    )
+                }))
+                .map_err(|_| ());
 
                 if r1 != r2 || s1.get_val() != s2.get_val() {
-                    println!("MISMATCH: {}", #method_name);
+                    println!("MISMATCH: {}", #fn_name_string);
                     println!("contructor: {:?}", constr_arg_struct);
                     println!("method: {:?}", method_arg_struct);
                     println!("r1 = {:?}, r2 = {:?}", r1, r2);
@@ -139,12 +143,12 @@ impl HarnessBackend for DFHarnessBackend {
         let test_fns = classifier
             .functions
             .iter()
-            .map(|func| format!("check_{}", func.flat_name()))
+            .map(|func| format!("check_{}", func.metadata.name.to_ident()))
             .chain(
                 classifier
                     .methods
                     .iter()
-                    .map(|method| format!("check_{}", method.flat_name())),
+                    .map(|method| format!("check_{}", method.metadata.name.to_ident())),
             )
             .collect::<Vec<_>>();
 
@@ -199,20 +203,24 @@ type DFHarnessGenerator = HarnessGenerator<DFHarnessBackend>;
 pub struct DifferentialFuzzing;
 
 impl DifferentialFuzzing {
-    fn generate_harness_file(&self, checker: &Checker) -> (Vec<String>, TokenStream) {
-        let generator = DFHarnessGenerator::new(checker.unchecked_funcs.clone());
+    fn generate_harness_file(&self, checker: &Checker) -> (Vec<Path>, TokenStream) {
+        let generator = DFHarnessGenerator::new(
+            checker.unchecked_funcs.clone(),
+            checker.src1.symbols.clone(),
+            checker.src2.symbols.clone(),
+        );
         // Collect functions and methods that are checked in harness
         let functions = generator
             .classifier
             .functions
             .iter()
-            .map(|f| f.name().to_owned())
+            .map(|f| f.metadata.name.clone())
             .chain(
                 generator
                     .classifier
                     .methods
                     .iter()
-                    .map(|f| f.name().to_owned()),
+                    .map(|f| f.metadata.name.clone()),
             )
             .collect::<Vec<_>>();
         let harness = generator.generate_harness();
@@ -302,7 +310,7 @@ postcard = "*"
     }
 
     /// Analyze the fuzzer output and return the functions that are not checked.
-    fn analyze_fuzzer_output(&self, functions: &[String], output_path: &str) -> CheckResult {
+    fn analyze_fuzzer_output(&self, functions: &[Path], output_path: &str) -> CheckResult {
         let mut res = CheckResult {
             status: Ok(()),
             ok: functions.to_vec(),
@@ -316,7 +324,7 @@ postcard = "*"
         for line in reader.lines() {
             if let Some(caps) = re.captures(&line.unwrap()) {
                 let func_name = caps[1].to_string();
-                if let Some(i) = res.ok.iter().position(|f| *f == func_name) {
+                if let Some(i) = res.ok.iter().position(|f| f.to_string() == func_name) {
                     res.ok.swap_remove(i);
                 }
             }
@@ -333,9 +341,13 @@ postcard = "*"
     }
 }
 
-impl CheckStep for DifferentialFuzzing {
+impl Component for DifferentialFuzzing {
     fn name(&self) -> &str {
         "Differential Fuzzing"
+    }
+
+    fn is_formal(&self) -> bool {
+        false
     }
 
     fn note(&self) -> Option<&str> {

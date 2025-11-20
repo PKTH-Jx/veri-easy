@@ -8,8 +8,8 @@ use syn::{
 };
 
 use crate::{
-    checker::{CheckResult, CheckStep, Checker},
-    function::type_to_string,
+    check::{CheckResult, Checker, Component},
+    defs::Path,
 };
 
 /// Alive2 step: use alive-tv to check function equivalence.
@@ -81,7 +81,7 @@ impl Alive2 {
                     func_name = Some(line[at + 1..parenthese].to_string().replace("___", "::"));
                 }
             } else if line.starts_with("Transformation seems to be correct!") {
-                res.ok.push(func_name.take().unwrap());
+                res.ok.push(Path::from_str(&func_name.take().unwrap()));
             } else if line.starts_with("ERROR") {
                 func_name = None;
             }
@@ -91,9 +91,13 @@ impl Alive2 {
     }
 }
 
-impl CheckStep for Alive2 {
+impl Component for Alive2 {
     fn name(&self) -> &str {
         "Alive2"
+    }
+
+    fn is_formal(&self) -> bool {
+        true
     }
 
     fn note(&self) -> Option<&str> {
@@ -191,4 +195,18 @@ fn export_functions(src: &str) -> Result<String> {
     let mut exporter = FnExporter::new();
     exporter.visit_file_mut(&mut syntax);
     Ok(prettyplease::unparse(&syntax))
+}
+
+/// Convert a type to a string
+fn type_to_string(ty: &syn::Type, sep: &str) -> String {
+    match ty {
+        syn::Type::Path(tp) => tp
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join(sep),
+        _ => "unsupported".to_owned(),
+    }
 }

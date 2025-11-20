@@ -1,27 +1,27 @@
 use crate::{
-    checker::{CheckStep, Checker},
-    source::Source,
-    steps::{Alive2, DifferentialFuzzing, Identical, Kani, PropertyBasedTesting},
+    check::{Checker, Component, Source},
+    components::{Alive2, DifferentialFuzzing, Identical, Kani, PropertyBasedTesting},
 };
 
-mod checker;
-mod function;
-mod generator;
-mod source;
-mod steps;
+mod check;
+mod collect;
+mod components;
+mod defs;
+mod generate;
 
 // In real usage, create Sources from file paths and run Checker with steps.
 fn main() -> anyhow::Result<()> {
-    let s1 = Source::new("a.rs")?;
-    let s2 = Source::new("b.rs")?;
-    let steps: Vec<Box<dyn CheckStep>> = vec![
+    let s1 = Source::open("a.rs")?;
+    let s2 = Source::open("b.rs")?;
+
+    let steps: Vec<Box<dyn Component>> = vec![
         Box::new(Identical),
-        // Box::new(Kani),
-        // Box::new(DifferentialFuzzing),
+        Box::new(Kani),
         Box::new(PropertyBasedTesting),
-        // Box::new(Alive2::new(
-        //     "/Users/jingx/Dev/os/verif/cmpir/alive2/build/alive-tv".to_owned(),
-        // )),
+        Box::new(DifferentialFuzzing),
+        Box::new(Alive2::new(
+            "/Users/jingx/Dev/os/verif/cmpir/alive2/build/alive-tv".to_owned(),
+        )),
     ];
 
     let mut checker = Checker::new(s1, s2, steps);
