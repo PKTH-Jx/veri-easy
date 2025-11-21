@@ -51,6 +51,7 @@ impl HarnessBackend for KaniHarnessBackend {
     fn make_harness_for_method(
         method: &CommonFunction,
         constructor: &CommonFunction,
+        getter: Option<&CommonFunction>,
         method_args: &[TokenStream],
         constructor_args: &[TokenStream],
         receiver_prefix: TokenStream,
@@ -64,6 +65,14 @@ impl HarnessBackend for KaniHarnessBackend {
         let method_arg_struct = format_ident!("Args{}", fn_name.to_ident());
         // Constructor argument struct name
         let constructor_arg_struct = format_ident!("Args{}", constr_name.to_ident());
+
+        // If a getter is provided, generate state check code after method call
+        let state_check = getter.map(|getter| {
+            let getter = &getter.metadata.signature.0.ident;
+            quote! {
+                assert!(s1.#getter() == s2.#getter());
+            }
+        });
 
         quote! {
             #[cfg(kani)]
@@ -81,7 +90,7 @@ impl HarnessBackend for KaniHarnessBackend {
                 let r2 = mod2::#fn_name(#receiver_prefix s2, #(method_arg_struct.#method_args),*);
 
                 assert!(r1 == r2);
-                assert!(s1.get_val() == s2.get_val());
+                #state_check
             }
         }
     }

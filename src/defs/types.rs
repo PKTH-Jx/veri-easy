@@ -17,6 +17,14 @@ impl Type {
             Type::Precise(precise) => precise.0.clone(),
         }
     }
+    /// Check equality ignoring generic parameters.
+    pub fn eq_ignore_generics(&self, other: &Type) -> bool {
+        match (self, other) {
+            (Type::Generic(g1), Type::Generic(g2)) => g1.path == g2.path,
+            (Type::Precise(p1), Type::Precise(p2)) => p1 == p2,
+            _ => false,
+        }
+    }
 }
 
 impl TryFrom<syn::Type> for Type {
@@ -56,9 +64,9 @@ pub struct PreciseType(pub Path);
 /// A generic type parameter.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GenericType {
-    /// Name of the generic type parameter.
+    /// The path of the base type.
     pub path: Path,
-    /// Instantiated types for this generic type parameter.
+    /// The generic type parameters.
     pub generics: Vec<Type>,
 }
 
@@ -81,4 +89,13 @@ impl GenericType {
         }
         full_path
     }
+}
+
+/// An instantiated generic type.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct InstantiatedType {
+    /// The alias type path.
+    pub alias: Path,
+    /// The concrete type it instantiates.
+    pub concrete: Type,
 }

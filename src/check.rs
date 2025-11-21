@@ -2,8 +2,8 @@
 use anyhow::Error;
 
 use crate::{
-    collect::{FunctionCollector, TraitCollector},
-    defs::{CommonFunction, Function, Path},
+    collect::{FunctionCollector, TraitCollector, TypeCollector},
+    defs::{CommonFunction, Function, InstantiatedType, Path, PreciseType, Type},
     log,
 };
 
@@ -17,6 +17,8 @@ pub struct Source {
     pub unique_funcs: Vec<Function>,
     /// Symbols need to be imported when generating harness.
     pub symbols: Vec<Path>,
+    /// Instantiated generic types.
+    pub inst_types: Vec<InstantiatedType>,
 }
 
 impl Source {
@@ -31,12 +33,15 @@ impl Source {
         let unique_funcs = FunctionCollector::new().collect(&syntax);
         // Collect symbols
         let symbols = TraitCollector::new().collect(&syntax);
+        // Collect instantiated generic types
+        let inst_types = TypeCollector::new().collect(&syntax);
 
         Ok(Self {
             path: path.to_owned(),
             content,
             unique_funcs,
             symbols,
+            inst_types,
         })
     }
 }
@@ -162,12 +167,24 @@ impl Checker {
         log!(Normal, Info, "  Verified: {:?}", self.verified_funcs);
         log!(Normal, Info, "  Tested: {:?}", self.tested_funcs);
         log!(Normal, Info, "  Unchecked: {:?}", self.unchecked_funcs);
-        log!(Verbose, Info, "  Source 1 unique funcs: {:?}", self.src1.unique_funcs);
-        log!(Verbose, Info, "  Source 2 unique funcs: {:?}", self.src2.unique_funcs);
+        log!(
+            Verbose,
+            Info,
+            "  Source 1 unique funcs: {:?}",
+            self.src1.unique_funcs
+        );
+        log!(
+            Verbose,
+            Info,
+            "  Source 2 unique funcs: {:?}",
+            self.src2.unique_funcs
+        );
     }
 
     /// Preprocess before running checks. Match functions with the same signature in both sources.
     fn preprocess(&mut self) {
+        let mut common_funcs = Vec::new();
+
         // Find common functions by signature
         for func in &self.src1.unique_funcs {
             if let Some(func2) = self
@@ -176,26 +193,64 @@ impl Checker {
                 .iter()
                 .find(|func2| func.metadata.signature == func2.metadata.signature)
             {
-                self.unchecked_funcs.push(CommonFunction::new(
+                common_funcs.push(CommonFunction::new(
                     func.metadata.clone(),
                     func.body.clone(),
                     func2.body.clone(),
                 ));
             }
         }
+
         // Remove common functions from unique lists
         self.src1.unique_funcs.retain(|func| {
-            !self
-                .unchecked_funcs
+            !common_funcs
                 .iter()
                 .any(|func2| func.metadata.name == func2.metadata.name)
         });
         self.src2.unique_funcs.retain(|func| {
-            !self
-                .unchecked_funcs
+            !common_funcs
                 .iter()
                 .any(|func2| func.metadata.name == func2.metadata.name)
         });
+
+        // Get the common instantiated generic types
+        let mut common_inst_types = Vec::new();
+        for inst_type in &self.src1.inst_types {
+            if let Some(_) = self
+                .src2
+                .inst_types
+                .iter()
+                .find(|inst_type2| inst_type == *inst_type2)
+            {
+                common_inst_types.push(inst_type.clone());
+            }
+        }
+
+        // If a common function has name `Foo<T>::foo()`, and there is an instantiated
+        // type `FB = Foo<Bar>`, We need to replace `Foo<T>::foo()` with `FB::foo()`
+        // in the common functions.
+        let mut updated_common_funcs = Vec::new();
+        for mut func in common_funcs {
+            if let Some(impl_type) = &func.metadata.impl_type {
+                if let Some(inst_type) = common_inst_types
+                    .iter()
+                    .find(|inst_type| inst_type.concrete.eq_ignore_generics(&impl_type))
+                {
+                    // Update the impl_type to the instantiated alias type
+                    func.metadata.impl_type =
+                        Some(Type::Precise(PreciseType(inst_type.alias.clone())));
+                    func.metadata.name = inst_type
+                        .alias
+                        .clone()
+                        .join(func.metadata.signature.0.ident.to_string());
+                    updated_common_funcs.push(func);
+                    continue;
+                }
+            }
+            updated_common_funcs.push(func);
+        }
+
+        self.unchecked_funcs = updated_common_funcs;
     }
 }
 

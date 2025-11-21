@@ -66,6 +66,7 @@ impl HarnessBackend for DFHarnessBackend {
     fn make_harness_for_method(
         method: &CommonFunction,
         constructor: &CommonFunction,
+        getter: Option<&CommonFunction>,
         method_args: &[TokenStream],
         constructor_args: &[TokenStream],
         receiver_prefix: TokenStream,
@@ -80,6 +81,24 @@ impl HarnessBackend for DFHarnessBackend {
         let method_arg_struct = format_ident!("Args{}", fn_name.to_ident());
         // Constructor argument struct name
         let constructor_arg_struct = format_ident!("Args{}", constr_name.to_ident());
+
+        // Error report message
+        let err_report = quote! {
+            println!("MISMATCH: {}", #fn_name_string);
+            println!("contructor: {:?}", constr_arg_struct);
+            println!("method: {:?}", method_arg_struct);
+        };
+
+        // If a getter is provided, generate state check code after method call
+        let state_check = getter.map(|getter| {
+            let getter = &getter.metadata.signature.0.ident;
+            quote! {
+                if s1.#getter() != s2.#getter() {
+                    #err_report
+                    return false;
+                }
+            }
+        });
 
         quote! {
             fn #test_fn_name(input: &[u8]) -> bool {
@@ -124,14 +143,13 @@ impl HarnessBackend for DFHarnessBackend {
                 }))
                 .map_err(|_| ());
 
-                if r1 != r2 || s1.get_val() != s2.get_val() {
-                    println!("MISMATCH: {}", #fn_name_string);
-                    println!("contructor: {:?}", constr_arg_struct);
-                    println!("method: {:?}", method_arg_struct);
-                    println!("r1 = {:?}, r2 = {:?}", r1, r2);
-                    println!("s1 = {:?}, s2 = {:?}", s1.get_val(), s2.get_val());
+                if r1 != r2 {
+                    #err_report
+                    return false;
                 }
-                r1 == r2 && s1.get_val() == s2.get_val()
+                #state_check
+
+                true
             }
         }
     }

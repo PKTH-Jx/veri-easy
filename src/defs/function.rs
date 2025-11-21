@@ -56,6 +56,10 @@ impl FunctionMetadata {
             trait_,
         }
     }
+    /// Get the function identifier.
+    pub fn ident(&self) -> String {
+        self.signature.0.ident.to_string()
+    }
 }
 
 impl Debug for FunctionMetadata {

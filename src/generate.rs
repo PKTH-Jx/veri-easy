@@ -5,15 +5,22 @@ use std::collections::BTreeMap;
 
 use crate::defs::{CommonFunction, Path, Type};
 
-/// Used to classify functions into free-standing functions, methods and constructors.
+/// Used to classify functions into
+///
+/// - Free-standing functions (without `self` receiver)
+/// - methods (with `self` receiver)
+/// - constructors (functions that has name `verieasy_new` inside an `impl` block)
+/// - state getters (functions that has name `verieasy_get` inside an `impl` block)
 #[derive(Debug)]
 pub struct FunctionClassifier {
     /// Free-standing functions.
     pub functions: Vec<CommonFunction>,
-    /// Methods (with `self` receiver).
+    /// Methods.
     pub methods: Vec<CommonFunction>,
-    /// Constructors (return `Self` type).
+    /// Constructors mapped by their type.
     pub constructors: BTreeMap<Type, CommonFunction>,
+    /// State getters mapped by their type.
+    pub getters: BTreeMap<Type, CommonFunction>,
 }
 
 impl FunctionClassifier {
@@ -23,11 +30,24 @@ impl FunctionClassifier {
             functions: Vec::new(),
             methods: Vec::new(),
             constructors: BTreeMap::new(),
+            getters: BTreeMap::new(),
         };
         for func in functions {
             if let Some(impl_type) = &func.metadata.impl_type {
-                let signature = &func.metadata.signature.0;
-                if signature
+                if func.metadata.ident() == "verieasy_new" {
+                    // Constructor
+                    res.constructors.insert(impl_type.clone(), func);
+                    continue;
+                } else if func.metadata.ident() == "verieasy_get" {
+                    // State getter
+                    res.getters.insert(impl_type.clone(), func);
+                    continue;
+                }
+
+                if func
+                    .metadata
+                    .signature
+                    .0
                     .inputs
                     .iter()
                     .any(|arg| matches!(arg, syn::FnArg::Receiver(_)))
@@ -35,20 +55,7 @@ impl FunctionClassifier {
                     // Has `self` receiver, consider it as a method.
                     res.methods.push(func);
                 } else {
-                    if let syn::ReturnType::Type(_, rt) = &signature.output {
-                        if let syn::Type::Path(type_path) = &**rt {
-                            if type_path.path.is_ident("Self") {
-                                // Return `Self` type, consider it as a constructor.
-                                res.constructors.insert(impl_type.clone(), func);
-                                continue;
-                            } else if type_path.path.is_ident(&impl_type.as_path().to_string()) {
-                                // Return `struct_name` type, consider it as a constructor.
-                                res.constructors.insert(impl_type.clone(), func);
-                                continue;
-                            }
-                        }
-                    }
-                    // No `self` receiver and not return `Self` type, consider it as a free-standing function.
+                    // No `self` receiver, consider it as a free-standing function.
                     res.functions.push(func);
                 }
             } else {
@@ -59,9 +66,10 @@ impl FunctionClassifier {
         res
     }
 
-    /// If `methods` doesn't have a method of type `T`, then its constructor is unused. This function
-    /// removes those constructors.
-    pub fn remove_unused_constructors(&mut self) {
+    /// If `methods` doesn't have a method of type `T`, then its constructor and getter asre unused.
+    ///
+    /// This function removes those constructors and getters.
+    pub fn remove_unused_constructors_and_getters(&mut self) {
         let mut unused_types = Vec::new();
         for (type_, _) in &self.constructors {
             if !self
@@ -72,14 +80,16 @@ impl FunctionClassifier {
                 unused_types.push(type_.clone());
             }
         }
-        for type_ in unused_types {
-            self.constructors.remove(&type_);
+        for type_ in &unused_types {
+            self.constructors.remove(type_);
+            self.getters.remove(type_);
         }
     }
 
     /// If `methods` has a method of type `T`, but `constructors` doesn't have a constructor of type `T`.
+    ///
     /// This function removes those methods.
-    pub fn remove_no_constructor_methods(&mut self) {
+    pub fn remove_methods_without_constructors(&mut self) {
         let mut no_constructor_types = Vec::new();
         for method in &self.methods {
             if !self.constructors.contains_key(method.impl_type()) {
@@ -113,8 +123,8 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
         mod2_imports: Vec<Path>,
     ) -> Self {
         let mut classifier = FunctionClassifier::classify(functions);
-        classifier.remove_unused_constructors();
-        classifier.remove_no_constructor_methods();
+        classifier.remove_unused_constructors_and_getters();
+        classifier.remove_methods_without_constructors();
         Self {
             classifier,
             mod1_imports,
@@ -200,6 +210,8 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
             .constructors
             .get(method.impl_type())
             .unwrap();
+        // getter may be absent
+        let getter = self.classifier.getters.get(method.impl_type());
 
         // collect constructor args
         let mut constructor_args = Vec::new();
@@ -244,6 +256,7 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
         B::make_harness_for_method(
             method,
             constructor,
+            getter,
             &method_args,
             &constructor_args,
             receiver_prefix,
@@ -304,6 +317,7 @@ pub trait HarnessBackend {
     fn make_harness_for_method(
         method: &CommonFunction,
         constructor: &CommonFunction,
+        getter: Option<&CommonFunction>,
         method_args: &[TokenStream],
         constructor_args: &[TokenStream],
         receiver_prefix: TokenStream,
