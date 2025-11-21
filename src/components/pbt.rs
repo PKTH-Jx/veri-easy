@@ -4,15 +4,13 @@ use anyhow::anyhow;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use regex::Regex;
-use std::{
-    io::{BufRead, BufReader, Write},
-    process::Command,
-};
+use std::io::{BufRead, BufReader, Write};
 
 use crate::{
     check::{CheckResult, Checker, Component},
     defs::{CommonFunction, Path},
     generate::{HarnessBackend, HarnessGenerator},
+    utils::run_command_and_log_error,
 };
 
 /// PBT harness generator backend.
@@ -133,6 +131,10 @@ impl HarnessBackend for PBTHarnessBackend {
         _additional: TokenStream,
     ) -> TokenStream {
         quote! {
+            #![allow(unused)]
+            #![allow(non_snake_case)]
+            #![allow(non_camel_case_types)]
+
             mod mod1;
             mod mod2;
 
@@ -198,9 +200,7 @@ impl PropertyBasedTesting {
         harness: TokenStream,
         harness_path: &str,
     ) -> anyhow::Result<()> {
-        Command::new("cargo")
-            .args(["new", "--bin", "--vcs", "none", harness_path])
-            .status()?;
+        run_command_and_log_error("cargo", &["new", "--bin", "--vcs", "none", harness_path])?;
 
         // Write rust files
         std::fs::File::create(harness_path.to_owned() + "/src/mod1.rs")
@@ -237,10 +237,7 @@ proptest-derive = "0.2.0"
         // Cargo fmt
         let cur_dir = std::env::current_dir().unwrap();
         let _ = std::env::set_current_dir(harness_path);
-        Command::new("cargo")
-            .args(["fmt"])
-            .status()
-            .map_err(|_| anyhow!("Failed to run cargo fmt"))?;
+        run_command_and_log_error("cargo", &["fmt"])?;
         let _ = std::env::set_current_dir(cur_dir);
 
         Ok(())
@@ -253,14 +250,11 @@ proptest-derive = "0.2.0"
 
         let cur_dir = std::env::current_dir().unwrap();
         let _ = std::env::set_current_dir(harness_path);
-        Command::new("cargo")
-            .args(["test"])
-            .stdout(output_file)
-            .stderr(std::fs::File::open("/dev/null").unwrap())
-            .status()
-            .map_err(|_| anyhow!("Failed to run proptest"))?;
+        let output = run_command_and_log_error("cargo", &["test"])?;
         let _ = std::env::set_current_dir(cur_dir);
 
+        std::io::copy(&mut output.stdout.as_slice(), &mut &output_file)
+            .map_err(|_| anyhow!("Failed to write fuzzer output"))?;
         Ok(())
     }
 

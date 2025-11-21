@@ -8,12 +8,13 @@ mod collect;
 mod components;
 mod defs;
 mod generate;
+mod log;
+mod utils;
 
 // In real usage, create Sources from file paths and run Checker with steps.
 fn main() -> anyhow::Result<()> {
     let s1 = Source::open("a.rs")?;
     let s2 = Source::open("b.rs")?;
-
     let steps: Vec<Box<dyn Component>> = vec![
         Box::new(Identical),
         Box::new(Kani),
@@ -24,13 +25,13 @@ fn main() -> anyhow::Result<()> {
         )),
     ];
 
-    let mut checker = Checker::new(s1, s2, steps);
-    checker.print_state();
+    log::init_logger(log::LogLevel::Normal);
 
-    match checker.run_all() {
-        Ok(()) => println!("✅ All functions consistent / checked."),
-        Err(e) => println!("❌ Check failed or undetermined: {}", e),
-    }
+    let mut checker = Checker::new(s1, s2, steps);
+    log!(Normal, Info, "Logging initial state:");
+    checker.print_state();
+    log!(Normal, Simple, "");
+    checker.run_all();
 
     Ok(())
 }

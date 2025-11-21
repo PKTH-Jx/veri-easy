@@ -4,15 +4,13 @@ use anyhow::anyhow;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use regex::Regex;
-use std::{
-    io::{BufRead, Write},
-    process::Command,
-};
+use std::io::{BufRead, Write};
 
 use crate::{
     check::{CheckResult, Checker, Component},
     defs::{CommonFunction, Path},
     generate::{HarnessBackend, HarnessGenerator},
+    utils::run_command_and_log_error,
 };
 
 /// Kani harness generator backend.
@@ -30,7 +28,7 @@ impl HarnessBackend for KaniHarnessBackend {
         function_args: &[TokenStream],
     ) -> TokenStream {
         let fn_name = &function.metadata.name;
-        
+
         // Test function name
         let test_fn_name = format_ident!("check_{}", fn_name.to_ident());
         // Function argument struct name
@@ -59,7 +57,7 @@ impl HarnessBackend for KaniHarnessBackend {
     ) -> TokenStream {
         let fn_name = &method.metadata.name;
         let constr_name = &constructor.metadata.name;
-        
+
         // Test function name
         let test_fn_name = format_ident!("check_{}", fn_name.to_ident());
         // Method argument struct name
@@ -146,9 +144,7 @@ impl Kani {
         harness: TokenStream,
         harness_path: &str,
     ) -> anyhow::Result<()> {
-        Command::new("cargo")
-            .args(["new", "--bin", "--vcs", "none", harness_path])
-            .status()?;
+        run_command_and_log_error("cargo", &["new", "--bin", "--vcs", "none", harness_path])?;
 
         // Write rust files
         std::fs::File::create(harness_path.to_owned() + "/src/mod1.rs")
@@ -184,10 +180,7 @@ kani = "*"
         // Cargo fmt
         let cur_dir = std::env::current_dir().unwrap();
         let _ = std::env::set_current_dir(harness_path);
-        Command::new("cargo")
-            .args(["fmt"])
-            .status()
-            .map_err(|_| anyhow!("Failed to run cargo fmt"))?;
+        run_command_and_log_error("cargo", &["fmt"])?;
         let _ = std::env::set_current_dir(cur_dir);
 
         Ok(())
@@ -200,13 +193,14 @@ kani = "*"
 
         let cur_dir = std::env::current_dir().unwrap();
         let _ = std::env::set_current_dir(harness_path);
-        Command::new("cargo")
-            .args(["kani", "-Z", "unstable-options", "--harness-timeout", "10s"])
-            .stdout(output_file)
-            .status()
-            .map_err(|_| anyhow!("Failed to run kani"))?;
+        let output = run_command_and_log_error(
+            "cargo",
+            &["kani", "-Z", "unstable-options", "--harness-timeout", "10s"],
+        )?;
         let _ = std::env::set_current_dir(cur_dir);
 
+        std::io::copy(&mut output.stdout.as_slice(), &mut &output_file)
+            .map_err(|_| anyhow!("Failed to write Kani output"))?;
         Ok(())
     }
 

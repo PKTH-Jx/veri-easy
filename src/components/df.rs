@@ -4,15 +4,13 @@ use anyhow::anyhow;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use regex::Regex;
-use std::{
-    io::{BufRead, BufReader, Write},
-    process::Command,
-};
+use std::io::{BufRead, BufReader, Write};
 
 use crate::{
     check::{CheckResult, Checker, Component},
     defs::{CommonFunction, Path},
     generate::{FunctionClassifier, HarnessBackend, HarnessGenerator},
+    utils::run_command_and_log_error,
 };
 
 /// Differential fuzzing harness generator backend.
@@ -75,7 +73,7 @@ impl HarnessBackend for DFHarnessBackend {
         let fn_name = &method.metadata.name;
         let fn_name_string = fn_name.to_string();
         let constr_name = &constructor.metadata.name;
-        
+
         // Test function name
         let test_fn_name = format_ident!("check_{}", fn_name.to_ident());
         // Method argument struct name
@@ -182,6 +180,10 @@ impl HarnessBackend for DFHarnessBackend {
         additional: TokenStream,
     ) -> TokenStream {
         quote! {
+            #![allow(unused)]
+            #![allow(non_snake_case)]
+            #![allow(non_camel_case_types)]
+
             mod mod1;
             mod mod2;
 
@@ -243,9 +245,7 @@ impl DifferentialFuzzing {
         harness: TokenStream,
         harness_path: &str,
     ) -> anyhow::Result<()> {
-        Command::new("cargo")
-            .args(["new", "--lib", "--vcs", "none", harness_path])
-            .status()?;
+        run_command_and_log_error("cargo", &["new", "--lib", "--vcs", "none", harness_path])?;
 
         // Write rust files
         std::fs::File::create(harness_path.to_owned() + "/src/mod1.rs")
@@ -282,10 +282,7 @@ postcard = "*"
         // Cargo fmt
         let cur_dir = std::env::current_dir().unwrap();
         let _ = std::env::set_current_dir(harness_path);
-        Command::new("cargo")
-            .args(["fmt"])
-            .status()
-            .map_err(|_| anyhow!("Failed to run cargo fmt"))?;
+        run_command_and_log_error("cargo", &["fmt"])?;
         let _ = std::env::set_current_dir(cur_dir);
 
         Ok(())
@@ -298,14 +295,11 @@ postcard = "*"
 
         let cur_dir = std::env::current_dir().unwrap();
         let _ = std::env::set_current_dir(fuzzer_path);
-        Command::new("cargo")
-            .args(["run", "--release"])
-            .stdout(output_file)
-            .stderr(std::fs::File::open("/dev/null").unwrap())
-            .status()
-            .map_err(|_| anyhow!("Failed to run kani"))?;
+        let output = run_command_and_log_error("cargo", &["run", "--release"])?;
         let _ = std::env::set_current_dir(cur_dir);
 
+        std::io::copy(&mut output.stdout.as_slice(), &mut &output_file)
+            .map_err(|_| anyhow!("Failed to write fuzzer output"))?;
         Ok(())
     }
 

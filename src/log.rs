@@ -1,0 +1,109 @@
+//! Logger utilities for veri-easy.
+
+use colored::Colorize;
+use std::sync::OnceLock;
+
+/// Logging level.
+#[derive(Debug, Clone, Copy)]
+pub enum LogLevel {
+    /// No logging.
+    Off,
+    /// Brief logging, including
+    ///
+    /// - Component name and note
+    /// - Check result of each component
+    Brief,
+    /// Normal logging, including
+    ///
+    /// - All brief logs
+    /// - Checker state after each component
+    Normal,
+    /// Verbose logging, including
+    ///
+    /// - All normal logs
+    /// - Detailed messages from components
+    Verbose,
+}
+
+/// Message type.
+#[derive(Debug, Clone, Copy)]
+pub enum MessageType {
+    /// Simple message.
+    Simple,
+    /// Informational message.
+    Info,
+    /// Critical information message.
+    Critical,
+    /// Error message.
+    Error,
+    /// Ok message.
+    Ok,
+}
+
+/// Logger structure.
+#[derive(Debug)]
+pub struct Logger {
+    /// Logger level.
+    level: LogLevel,
+}
+
+impl Logger {
+    /// Create a new logger.
+    pub fn new(level: LogLevel) -> Self {
+        Self { level }
+    }
+
+    /// Get the format string for a message type.
+    fn format_msg(&self, msg_type: MessageType, msg: &str) -> String {
+        let pref = match msg_type {
+            MessageType::Simple => "".to_string(),
+            MessageType::Info => "[Info] ".blue().bold().to_string(),
+            MessageType::Critical => "[Critical] ".cyan().bold().to_string(),
+            MessageType::Error => "[Error] ".red().bold().to_string(),
+            MessageType::Ok => "[Ok] ".green().bold().to_string(),
+        };
+        format!("{}{}", pref, msg)
+    }
+
+    /// Log a message if the level is sufficient.
+    pub fn log(&self, level: LogLevel, msg_type: MessageType, msg: &str) {
+        if (self.level as u8) >= (level as u8) {
+            println!("{}", self.format_msg(msg_type, msg));
+        }
+    }
+}
+
+/// Global logger instance.
+static LOGGER: OnceLock<Logger> = OnceLock::new();
+
+/// Initialize the global logger.
+pub fn init_logger(level: LogLevel) {
+    LOGGER.set(Logger::new(level)).unwrap();
+}
+
+/// Get the global logger.
+pub fn get_logger() -> &'static Logger {
+    LOGGER.get().expect("Logger not initialized")
+}
+
+/// Log a message using the global logger.
+#[macro_export]
+macro_rules! log {
+    ($level:ident, $msg_type:ident, $msg:expr) => {
+        $crate::log::get_logger().log(
+            $crate::log::LogLevel::$level, $crate::log::MessageType::$msg_type, $msg)
+    };
+    ($level:ident, $msg_type:ident, $fmt:expr, $($arg:tt)*) => {
+        $crate::log::get_logger().log(
+            $crate::log::LogLevel::$level, $crate::log::MessageType::$msg_type, &format!($fmt, $($arg)*))
+    };
+    // If no level or type is specified, default to Normal and Simple
+    ($msg:expr) => {
+        $crate::log::get_logger().log(
+            $crate::log::LogLevel::Normal, $crate::log::MessageType::Simple, $msg)
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        $crate::log::get_logger().log(
+            $crate::log::LogLevel::Normal, $crate::log::MessageType::Simple, &format!($fmt, $($arg)*))
+    };
+}

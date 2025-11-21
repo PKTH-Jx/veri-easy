@@ -1,7 +1,11 @@
 //! Veri-easy functional equivalence checker.
 use anyhow::Error;
 
-use crate::{collect::{FunctionCollector, TraitCollector}, defs::{CommonFunction, Function, Path}};
+use crate::{
+    collect::{FunctionCollector, TraitCollector},
+    defs::{CommonFunction, Function, Path},
+    log,
+};
 
 /// A Rust source file with information about functions and symbols.
 pub struct Source {
@@ -22,12 +26,12 @@ impl Source {
             std::fs::read_to_string(&path).map_err(|_| anyhow::anyhow!("Failed to read source"))?;
         let syntax = syn::parse_file(&content)
             .map_err(|_| anyhow::anyhow!("Failed to parse source file"))?;
-        
+
         // Collect functions
         let unique_funcs = FunctionCollector::new().collect(&syntax);
         // Collect symbols
         let symbols = TraitCollector::new().collect(&syntax);
-        
+
         Ok(Self {
             path: path.to_owned(),
             content,
@@ -70,21 +74,39 @@ impl Checker {
     }
 
     /// Run all steps in order
-    pub fn run_all(&mut self) -> anyhow::Result<()> {
+    pub fn run_all(&mut self) {
         for component in &self.components {
-            println!(""); // empty line to separate steps
             match component.note() {
-                Some(note) => println!("Step `{}` => {:?}", component.name(), note),
-                None => println!("Step `{}`", component.name()),
+                Some(note) => log!(
+                    Brief,
+                    Critical,
+                    "Running component `{}`: {}",
+                    component.name(),
+                    note
+                ),
+                None => log!(Brief, Critical, "Running component `{}`", component.name()),
             }
 
             let res = component.run(&self);
             if let Err(e) = res.status {
-                println!("Step `{}` failed to execute: {}", component.name(), e);
+                log!(
+                    Brief,
+                    Error,
+                    "Component `{}` failed to execute: {}",
+                    component.name(),
+                    e
+                );
+                continue;
             }
+            log!(
+                Brief,
+                Critical,
+                "Component `{}` completed.",
+                component.name()
+            );
 
             for name in &res.ok {
-                println!("OK: {:?}", name);
+                log!(Brief, Ok, "`{:?}` passed", name);
                 if let Some(func) = self
                     .unchecked_funcs
                     .iter()
@@ -99,15 +121,28 @@ impl Checker {
                         .retain(|func2| func2.metadata.name != *name);
                 }
             }
-            self.print_state();
 
             if !res.fail.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "Step `{}` failed: inconsistent functions {:?}",
-                    component.name(),
-                    res.fail
-                ));
+                for name in &res.fail {
+                    log!(Brief, Error, "`{:?}` failed", name);
+                }
+                log!(
+                    Brief,
+                    Error,
+                    "Step `{}` found inconsistencies.",
+                    component.name()
+                );
+                self.print_state();
+                break;
             }
+            log!(
+                Normal,
+                Info,
+                "State after component `{}`:",
+                component.name()
+            );
+            self.print_state();
+            log!(Brief, Simple, "");
         }
 
         if !self.unchecked_funcs.is_empty() {
@@ -116,20 +151,19 @@ impl Checker {
                 .iter()
                 .map(|f| &f.metadata.name)
                 .collect();
-            Err(anyhow::anyhow!("Unchecked functions remain: {:?}", names))
+            log!(Brief, Error, "Unchecked functions remain: {:?}", names);
         } else {
-            Ok(())
+            log!(Brief, Ok, "All functions have been checked.");
         }
     }
 
     /// Print current state of the checker
     pub fn print_state(&self) {
-        println!("Checker state:");
-        println!("  Verified: {:?}", self.verified_funcs);
-        println!("  Tested: {:?}", self.tested_funcs);
-        println!("  Unchecked: {:?}", self.unchecked_funcs);
-        println!("  Source1 Unique: {:?}", self.src1.unique_funcs);
-        println!("  Source2 Unique: {:?}", self.src2.unique_funcs);
+        log!(Normal, Info, "  Verified: {:?}", self.verified_funcs);
+        log!(Normal, Info, "  Tested: {:?}", self.tested_funcs);
+        log!(Normal, Info, "  Unchecked: {:?}", self.unchecked_funcs);
+        log!(Verbose, Info, "  Source 1 unique funcs: {:?}", self.src1.unique_funcs);
+        log!(Verbose, Info, "  Source 2 unique funcs: {:?}", self.src2.unique_funcs);
     }
 
     /// Preprocess before running checks. Match functions with the same signature in both sources.
