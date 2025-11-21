@@ -38,7 +38,7 @@ impl HarnessBackend for PBTHarnessBackend {
 
         quote! {
             #[test]
-            fn #test_fn_name(function_args in any::<#function_arg_struct>()) {
+            fn #test_fn_name(function_arg_struct in any::<#function_arg_struct>()) {
                 // Function call
                 let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     mod1::#fn_name(#(function_arg_struct.#function_args),*)
@@ -54,7 +54,7 @@ impl HarnessBackend for PBTHarnessBackend {
                     println!("function: {:?}", function_arg_struct);
                     println!("r1 = {:?}, r2 = {:?}", r1, r2);
                 }
-                assert(r1 == r2);
+                assert!(r1 == r2);
             }
         }
     }
@@ -91,7 +91,7 @@ impl HarnessBackend for PBTHarnessBackend {
             quote! {
                 if s1.#getter() != s2.#getter() {
                     #err_report
-                    assert(false);
+                    assert!(false);
                 }
             }
         });
@@ -132,7 +132,7 @@ impl HarnessBackend for PBTHarnessBackend {
 
                 if r1 != r2 {
                     #err_report
-                    assert(false);
+                    assert!(false);
                 }
                 #state_check
             }
@@ -177,20 +177,16 @@ pub struct PropertyBasedTesting;
 
 impl PropertyBasedTesting {
     fn generate_harness_file(&self, checker: &Checker) -> (Vec<Path>, TokenStream) {
-        let generator = PBTHarnessGenerator::new(
-            checker.unchecked_funcs.clone(),
-            checker.src1.symbols.clone(),
-            checker.src2.symbols.clone(),
-        );
+        let generator = PBTHarnessGenerator::new(checker);
         // Collect functions and methods that are checked in harness
         let functions = generator
-            .classifier
+            .collection
             .functions
             .iter()
             .map(|f| f.metadata.name.clone())
             .chain(
                 generator
-                    .classifier
+                    .collection
                     .methods
                     .iter()
                     .map(|f| f.metadata.name.clone()),

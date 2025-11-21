@@ -129,11 +129,7 @@ pub struct Kani;
 impl Kani {
     /// Generate harness code for Kani.
     fn generate_harness(&self, checker: &Checker) -> TokenStream {
-        let generator = KaniHarnessGenerator::new(
-            checker.unchecked_funcs.clone(),
-            checker.src1.symbols.clone(),
-            checker.src2.symbols.clone(),
-        );
+        let generator = KaniHarnessGenerator::new(checker);
         generator.generate_harness()
     }
 

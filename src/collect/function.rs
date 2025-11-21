@@ -15,8 +15,6 @@ struct Function {
     signature: Signature,
     /// The impl type if it's an impl method.
     impl_type: Option<Type>,
-    /// The trait if it's an impl method for a trait.
-    trait_: Option<Path>,
     /// Function body.
     body: Block,
 }
@@ -50,7 +48,6 @@ impl<'ast> FunctionCollector<'ast> {
                     func.name,
                     crate::defs::Signature(func.signature),
                     func.impl_type,
-                    func.trait_,
                 ),
                 quote::quote! { #body }.to_string(),
             ));
@@ -83,7 +80,6 @@ impl<'ast> Visit<'ast> for FunctionCollector<'ast> {
             name,
             signature: i.sig.clone(),
             impl_type: None,
-            trait_: None,
             body: (*i.block).clone(),
         });
     }
@@ -112,7 +108,6 @@ impl<'ast> Visit<'ast> for FunctionCollector<'ast> {
             self.functions.push(Function {
                 name,
                 impl_type: Some(self_ty),
-                trait_: impl_block.trait_.map(|(_, path, _)| path.into()),
                 signature: i.sig.clone(),
                 body: i.block.clone(),
             });

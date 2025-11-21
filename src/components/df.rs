@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Write};
 use crate::{
     check::{CheckResult, Checker, Component},
     defs::{CommonFunction, Path},
-    generate::{FunctionClassifier, HarnessBackend, HarnessGenerator},
+    generate::{FunctionCollection, HarnessBackend, HarnessGenerator},
     utils::run_command_and_log_error,
 };
 
@@ -154,7 +154,7 @@ impl HarnessBackend for DFHarnessBackend {
         }
     }
 
-    fn additional_code(classifier: &FunctionClassifier) -> TokenStream {
+    fn additional_code(classifier: &FunctionCollection) -> TokenStream {
         // Generate dispatch function as additional code
         let test_fns = classifier
             .functions
@@ -224,20 +224,16 @@ pub struct DifferentialFuzzing;
 
 impl DifferentialFuzzing {
     fn generate_harness_file(&self, checker: &Checker) -> (Vec<Path>, TokenStream) {
-        let generator = DFHarnessGenerator::new(
-            checker.unchecked_funcs.clone(),
-            checker.src1.symbols.clone(),
-            checker.src2.symbols.clone(),
-        );
+        let generator = DFHarnessGenerator::new(checker);
         // Collect functions and methods that are checked in harness
         let functions = generator
-            .classifier
+            .collection
             .functions
             .iter()
             .map(|f| f.metadata.name.clone())
             .chain(
                 generator
-                    .classifier
+                    .collection
                     .methods
                     .iter()
                     .map(|f| f.metadata.name.clone()),

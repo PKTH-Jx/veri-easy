@@ -37,8 +37,6 @@ pub struct FunctionMetadata {
     pub signature: Signature,
     /// If the function is an impl method, the impl type.
     pub impl_type: Option<Type>,
-    /// If the function is implemented against a trait, the trait name.
-    pub trait_: Option<Path>,
 }
 
 impl FunctionMetadata {
@@ -47,18 +45,32 @@ impl FunctionMetadata {
         name: Path,
         signature: Signature,
         impl_type: Option<Type>,
-        trait_: Option<Path>,
     ) -> Self {
         Self {
             name,
             signature,
             impl_type,
-            trait_,
         }
     }
+
     /// Get the function identifier.
     pub fn ident(&self) -> String {
         self.signature.0.ident.to_string()
+    }
+
+    /// If the function is a constructor.
+    pub fn is_constructor(&self) -> bool {
+        self.impl_type.is_some() && self.signature.0.ident == "verieasy_new"
+    }
+
+    /// If the function is a getter.
+    pub fn is_getter(&self) -> bool {
+        self.impl_type.is_some()
+            && matches!(
+                self.signature.0.inputs.first(),
+                Some(syn::FnArg::Receiver(_))
+            )
+            && self.signature.0.ident == "verieasy_get"
     }
 }
 

@@ -4,18 +4,19 @@ use quote::{format_ident, quote};
 use std::collections::BTreeMap;
 
 use crate::{
+    check::Checker,
     defs::{CommonFunction, Path, Type},
     log,
 };
 
-/// Used to classify functions into
+/// Structure that stores functions into 4 different categories:
 ///
 /// - Free-standing functions (without `self` receiver)
 /// - methods (with `self` receiver)
 /// - constructors (functions that has name `verieasy_new` inside an `impl` block)
 /// - state getters (functions that has name `verieasy_get` inside an `impl` block)
 #[derive(Debug)]
-pub struct FunctionClassifier {
+pub struct FunctionCollection {
     /// Free-standing functions.
     pub functions: Vec<CommonFunction>,
     /// Methods.
@@ -26,9 +27,15 @@ pub struct FunctionClassifier {
     pub getters: BTreeMap<Type, CommonFunction>,
 }
 
-impl FunctionClassifier {
-    /// Classify functions into free-standing functions, methods and constructors.
-    pub fn classify(functions: Vec<CommonFunction>) -> Self {
+impl FunctionCollection {
+    /// Classify functions into free-standing functions, methods.
+    ///
+    /// Construct map for constructors and getters.
+    pub fn new(
+        functions: Vec<CommonFunction>,
+        constructors: Vec<CommonFunction>,
+        getters: Vec<CommonFunction>,
+    ) -> Self {
         let mut res = Self {
             functions: Vec::new(),
             methods: Vec::new(),
@@ -36,17 +43,7 @@ impl FunctionClassifier {
             getters: BTreeMap::new(),
         };
         for func in functions {
-            if let Some(impl_type) = &func.metadata.impl_type {
-                if func.metadata.ident() == "verieasy_new" {
-                    // Constructor
-                    res.constructors.insert(impl_type.clone(), func);
-                    continue;
-                } else if func.metadata.ident() == "verieasy_get" {
-                    // State getter
-                    res.getters.insert(impl_type.clone(), func);
-                    continue;
-                }
-
+            if let Some(_) = &func.metadata.impl_type {
                 if func
                     .metadata
                     .signature
@@ -64,6 +61,16 @@ impl FunctionClassifier {
             } else {
                 // Function outside of impl block is a free-standing function.
                 res.functions.push(func);
+            }
+        }
+        for constructor in constructors {
+            if let Some(impl_type) = &constructor.metadata.impl_type {
+                res.constructors.insert(impl_type.clone(), constructor);
+            }
+        }
+        for getter in getters {
+            if let Some(impl_type) = &getter.metadata.impl_type {
+                res.getters.insert(impl_type.clone(), getter);
             }
         }
         res
@@ -123,7 +130,7 @@ impl FunctionClassifier {
 /// Generic harness generator using a backend.
 pub struct HarnessGenerator<B: HarnessBackend> {
     /// Functions used to generate the harness
-    pub classifier: FunctionClassifier,
+    pub collection: FunctionCollection,
     /// Imports from mod1
     pub mod1_imports: Vec<Path>,
     /// Imports from mod2
@@ -133,19 +140,19 @@ pub struct HarnessGenerator<B: HarnessBackend> {
 }
 
 impl<B: HarnessBackend> HarnessGenerator<B> {
-    /// Create a new harness generator for the given functions and traits.
-    pub fn new(
-        functions: Vec<CommonFunction>,
-        mod1_imports: Vec<Path>,
-        mod2_imports: Vec<Path>,
-    ) -> Self {
-        let mut classifier = FunctionClassifier::classify(functions);
-        classifier.remove_unused_constructors_and_getters();
-        classifier.remove_methods_without_constructors();
+    /// Create a new harness generator for the given functions.
+    pub fn new(checker: &Checker) -> Self {
+        let mut collection = FunctionCollection::new(
+            checker.unchecked_funcs.clone(),
+            checker.constructors.clone(),
+            checker.getters.clone(),
+        );
+        collection.remove_unused_constructors_and_getters();
+        collection.remove_methods_without_constructors();
         Self {
-            classifier,
-            mod1_imports,
-            mod2_imports,
+            collection,
+            mod1_imports: checker.src1.symbols.clone(),
+            mod2_imports: checker.src2.symbols.clone(),
             _backend: std::marker::PhantomData,
         }
     }
@@ -171,7 +178,7 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
     /// Generate all argument structs for functions, methods, and constructors.
     fn generate_all_arg_structs(&self) -> Vec<TokenStream> {
         let mut func_structs = self
-            .classifier
+            .collection
             .functions
             .iter()
             .map(|f| self.generate_arg_struct(f))
@@ -179,9 +186,9 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
 
         let mut method_structs = Vec::<TokenStream>::new();
         let mut used_constructors = Vec::<&CommonFunction>::new();
-        for method in &self.classifier.methods {
+        for method in &self.collection.methods {
             let constructor = self
-                .classifier
+                .collection
                 .constructors
                 .get(method.impl_type())
                 .unwrap();
@@ -223,12 +230,12 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
     /// Generate a harness function for comparing two methods.
     fn generate_harness_for_method(&self, method: &CommonFunction) -> TokenStream {
         let constructor = self
-            .classifier
+            .collection
             .constructors
             .get(method.impl_type())
             .unwrap();
         // getter may be absent
-        let getter = self.classifier.getters.get(method.impl_type());
+        let getter = self.collection.getters.get(method.impl_type());
 
         // collect constructor args
         let mut constructor_args = Vec::new();
@@ -302,18 +309,18 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
         let imports = self.generate_imports();
         let arg_structs = self.generate_all_arg_structs();
         let functions = self
-            .classifier
+            .collection
             .functions
             .iter()
             .map(|func| self.generate_harness_for_function(func))
             .collect::<Vec<_>>();
         let methods = self
-            .classifier
+            .collection
             .methods
             .iter()
             .map(|method| self.generate_harness_for_method(method))
             .collect::<Vec<_>>();
-        let additional = B::additional_code(&self.classifier);
+        let additional = B::additional_code(&self.collection);
 
         B::finalize(imports, arg_structs, functions, methods, additional)
     }
@@ -341,7 +348,7 @@ pub trait HarnessBackend {
     ) -> TokenStream;
 
     /// Other additional code pieces needed can be added as associated functions here.
-    fn additional_code(_classifier: &FunctionClassifier) -> TokenStream {
+    fn additional_code(_classifier: &FunctionCollection) -> TokenStream {
         quote! {}
     }
 

@@ -46,6 +46,44 @@ impl Source {
     }
 }
 
+/// Typed check result
+#[derive(Debug)]
+pub struct CheckResult {
+    /// Overall status (e.g., any fatal error that prevented full checking)
+    pub status: anyhow::Result<()>,
+    /// Functions that passed the consistency check
+    pub ok: Vec<Path>,
+    /// Functions that failed the consistency check
+    pub fail: Vec<Path>,
+}
+
+impl CheckResult {
+    pub fn failed(e: Error) -> Self {
+        Self {
+            status: Err(e),
+            ok: Vec::new(),
+            fail: Vec::new(),
+        }
+    }
+}
+
+/// A single check component, either formal or testing-based.
+pub trait Component {
+    /// Name of the component.
+    fn name(&self) -> &str;
+
+    /// If this component is a formal checker.
+    fn is_formal(&self) -> bool;
+
+    /// Additional note to print.
+    fn note(&self) -> Option<&str> {
+        None
+    }
+
+    /// Run the check component.
+    fn run(&self, checker: &Checker) -> CheckResult;
+}
+
 /// The main Checker structure.
 ///
 /// Check function consistency between two sources through multiple components.
@@ -62,6 +100,10 @@ pub struct Checker {
     pub verified_funcs: Vec<CommonFunction>,
     /// Functions that has been checked by testing components.
     pub tested_funcs: Vec<CommonFunction>,
+    /// Constructors.
+    pub constructors: Vec<CommonFunction>,
+    /// Getters.
+    pub getters: Vec<CommonFunction>,
 }
 
 impl Checker {
@@ -73,6 +115,8 @@ impl Checker {
             verified_funcs: Vec::new(),
             unchecked_funcs: Vec::new(),
             tested_funcs: Vec::new(),
+            constructors: Vec::new(),
+            getters: Vec::new(),
         };
         checker.preprocess();
         checker
@@ -250,44 +294,20 @@ impl Checker {
             updated_common_funcs.push(func);
         }
 
+        // Get constructor functions (`verieasy_new`) from common functions
+        self.constructors = updated_common_funcs
+            .iter()
+            .filter(|f| f.metadata.is_constructor())
+            .cloned()
+            .collect();
+        // Get getter functions (`verieasy_get`) from common functions
+        self.getters = updated_common_funcs
+            .iter()
+            .filter(|f| f.metadata.is_getter())
+            .cloned()
+            .collect();
+
+        updated_common_funcs.retain(|f| !f.metadata.is_constructor() && !f.metadata.is_getter());
         self.unchecked_funcs = updated_common_funcs;
     }
-}
-
-/// Typed check result
-#[derive(Debug)]
-pub struct CheckResult {
-    /// Overall status (e.g., any fatal error that prevented full checking)
-    pub status: anyhow::Result<()>,
-    /// Functions that passed the consistency check
-    pub ok: Vec<Path>,
-    /// Functions that failed the consistency check
-    pub fail: Vec<Path>,
-}
-
-impl CheckResult {
-    pub fn failed(e: Error) -> Self {
-        Self {
-            status: Err(e),
-            ok: Vec::new(),
-            fail: Vec::new(),
-        }
-    }
-}
-
-/// A single check component, either formal or testing-based.
-pub trait Component {
-    /// Name of the component.
-    fn name(&self) -> &str;
-
-    /// If this component is a formal checker.
-    fn is_formal(&self) -> bool;
-
-    /// Additional note to print.
-    fn note(&self) -> Option<&str> {
-        None
-    }
-
-    /// Run the check component.
-    fn run(&self, checker: &Checker) -> CheckResult;
 }
