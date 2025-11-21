@@ -34,6 +34,8 @@ pub enum MessageType {
     Info,
     /// Critical information message.
     Critical,
+    /// Warning message.
+    Warning,
     /// Error message.
     Error,
     /// Ok message.
@@ -59,6 +61,7 @@ impl Logger {
             MessageType::Simple => "".to_string(),
             MessageType::Info => "[Info] ".blue().bold().to_string(),
             MessageType::Critical => "[Critical] ".cyan().bold().to_string(),
+            MessageType::Warning => "[Warning] ".yellow().bold().to_string(),
             MessageType::Error => "[Error] ".red().bold().to_string(),
             MessageType::Ok => "[Ok] ".green().bold().to_string(),
         };

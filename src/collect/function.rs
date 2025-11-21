@@ -74,6 +74,10 @@ impl<'ast> Visit<'ast> for FunctionCollector<'ast> {
         if !i.sig.generics.params.is_empty() {
             return;
         } // Skip generic functions
+        if i.attrs.iter().any(|attr| attr.path().is_ident("ignore")) {
+            return;
+        } // Skip functions marked with #[ignore]
+
         let name = self.resolver.concat_module(&i.sig.ident.to_string());
         self.functions.push(Function {
             name,
@@ -94,6 +98,10 @@ impl<'ast> Visit<'ast> for FunctionCollector<'ast> {
         if !i.sig.generics.params.is_empty() {
             return;
         } // Skip generic functions
+        if i.attrs.iter().any(|attr| attr.path().is_ident("ignore")) {
+            return;
+        } // Skip functions marked with #[ignore]
+
         let impl_block = self.impl_block.cloned().unwrap();
         if let Ok(mut self_ty) = Type::try_from(*impl_block.self_ty) {
             match &mut self_ty {

@@ -230,22 +230,22 @@ impl Checker {
         // type `FB = Foo<Bar>`, We need to replace `Foo<T>::foo()` with `FB::foo()`
         // in the common functions.
         let mut updated_common_funcs = Vec::new();
-        for mut func in common_funcs {
+        for func in common_funcs {
             if let Some(impl_type) = &func.metadata.impl_type {
-                if let Some(inst_type) = common_inst_types
-                    .iter()
-                    .find(|inst_type| inst_type.concrete.eq_ignore_generics(&impl_type))
-                {
-                    // Update the impl_type to the instantiated alias type
-                    func.metadata.impl_type =
-                        Some(Type::Precise(PreciseType(inst_type.alias.clone())));
-                    func.metadata.name = inst_type
-                        .alias
-                        .clone()
-                        .join(func.metadata.signature.0.ident.to_string());
-                    updated_common_funcs.push(func);
-                    continue;
+                for inst_type in &self.src1.inst_types {
+                    if inst_type.concrete.eq_ignore_generics(impl_type) {
+                        let mut func = func.clone();
+                        // Update the impl_type to the instantiated alias type
+                        func.metadata.impl_type =
+                            Some(Type::Precise(PreciseType(inst_type.alias.clone())));
+                        func.metadata.name = inst_type
+                            .alias
+                            .clone()
+                            .join(func.metadata.signature.0.ident.to_string());
+                        updated_common_funcs.push(func);
+                    }
                 }
+                continue;
             }
             updated_common_funcs.push(func);
         }

@@ -3,7 +3,10 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::collections::BTreeMap;
 
-use crate::defs::{CommonFunction, Path, Type};
+use crate::{
+    defs::{CommonFunction, Path, Type},
+    log,
+};
 
 /// Used to classify functions into
 ///
@@ -81,6 +84,12 @@ impl FunctionClassifier {
             }
         }
         for type_ in &unused_types {
+            log!(
+                Verbose,
+                Warning,
+                "Type `{:?}` doesn't have any methods, remove its constructor and getter.",
+                type_.as_path()
+            );
             self.constructors.remove(type_);
             self.getters.remove(type_);
         }
@@ -92,11 +101,19 @@ impl FunctionClassifier {
     pub fn remove_methods_without_constructors(&mut self) {
         let mut no_constructor_types = Vec::new();
         for method in &self.methods {
-            if !self.constructors.contains_key(method.impl_type()) {
+            if !self.constructors.contains_key(method.impl_type())
+                && !no_constructor_types.iter().any(|t| t == method.impl_type())
+            {
                 no_constructor_types.push(method.impl_type().clone());
             }
         }
         for type_ in &no_constructor_types {
+            log!(
+                Normal,
+                Warning,
+                "Type `{:?}` doesn't have a constructor, skip all its methods.",
+                type_.as_path()
+            );
             self.methods
                 .retain(|m| m.metadata.impl_type.as_ref() != Some(type_));
         }

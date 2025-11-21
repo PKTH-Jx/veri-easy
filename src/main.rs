@@ -13,8 +13,8 @@ mod utils;
 
 // In real usage, create Sources from file paths and run Checker with steps.
 fn main() -> anyhow::Result<()> {
-    let s1 = Source::open("a.rs")?;
-    let s2 = Source::open("b.rs")?;
+    let s1 = Source::open("v1_impl.rs")?;
+    let s2 = Source::open("v2_impl.rs")?;
     let steps: Vec<Box<dyn Component>> = vec![
         Box::new(Identical),
         Box::new(Kani),
@@ -26,6 +26,13 @@ fn main() -> anyhow::Result<()> {
     ];
 
     log::init_logger(log::LogLevel::Normal);
+    log!(
+        Brief,
+        Critical,
+        "Starting verification between `{}` and `{}`\n",
+        s1.path,
+        s2.path
+    );
 
     let mut checker = Checker::new(s1, s2, steps);
     log!(Normal, Info, "Logging initial state:");
