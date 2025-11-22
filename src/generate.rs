@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     check::Checker,
-    defs::{CommonFunction, Path, Type},
+    defs::{CommonFunction, Path, Precondition, Type},
     log,
 };
 
@@ -25,6 +25,8 @@ pub struct FunctionCollection {
     pub constructors: BTreeMap<Type, CommonFunction>,
     /// State getters mapped by their type.
     pub getters: BTreeMap<Type, CommonFunction>,
+    /// Preconditions
+    pub preconditions: Vec<Precondition>,
 }
 
 impl FunctionCollection {
@@ -35,12 +37,14 @@ impl FunctionCollection {
         functions: Vec<CommonFunction>,
         constructors: Vec<CommonFunction>,
         getters: Vec<CommonFunction>,
+        preconditions: Vec<Precondition>,
     ) -> Self {
         let mut res = Self {
             functions: Vec::new(),
             methods: Vec::new(),
             constructors: BTreeMap::new(),
             getters: BTreeMap::new(),
+            preconditions,
         };
         for func in functions {
             if let Some(_) = &func.metadata.impl_type {
@@ -76,10 +80,17 @@ impl FunctionCollection {
         res
     }
 
+    /// Get the precondition for the given function.
+    pub fn get_precondition(&self, func: &CommonFunction) -> Option<&Precondition> {
+        self.preconditions
+            .iter()
+            .find(|pre| pre.name == func.metadata.name)
+    }
+
     /// If `methods` doesn't have a method of type `T`, then its constructor and getter asre unused.
     ///
     /// This function removes those constructors and getters.
-    pub fn remove_unused_constructors_and_getters(&mut self) {
+    fn remove_unused_constructors_and_getters(&mut self) {
         let mut unused_types = Vec::new();
         for (type_, _) in &self.constructors {
             if !self
@@ -95,7 +106,7 @@ impl FunctionCollection {
                 Verbose,
                 Warning,
                 "Type `{:?}` doesn't have any methods, remove its constructor and getter.",
-                type_.as_path()
+                type_.to_path()
             );
             self.constructors.remove(type_);
             self.getters.remove(type_);
@@ -105,7 +116,7 @@ impl FunctionCollection {
     /// If `methods` has a method of type `T`, but `constructors` doesn't have a constructor of type `T`.
     ///
     /// This function removes those methods.
-    pub fn remove_methods_without_constructors(&mut self) {
+    fn remove_methods_without_constructors(&mut self) {
         let mut no_constructor_types = Vec::new();
         for method in &self.methods {
             if !self.constructors.contains_key(method.impl_type())
@@ -119,7 +130,7 @@ impl FunctionCollection {
                 Normal,
                 Warning,
                 "Type `{:?}` doesn't have a constructor, skip all its methods.",
-                type_.as_path()
+                type_.to_path()
             );
             self.methods
                 .retain(|m| m.metadata.impl_type.as_ref() != Some(type_));
@@ -146,6 +157,7 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
             checker.unchecked_funcs.clone(),
             checker.constructors.clone(),
             checker.getters.clone(),
+            checker.preconditions.clone(),
         );
         collection.remove_unused_constructors_and_getters();
         collection.remove_methods_without_constructors();
@@ -213,6 +225,8 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
 
     /// Generate a harness function for comparing two free-standing functions.
     fn generate_harness_for_function(&self, func: &CommonFunction) -> TokenStream {
+        let precondition = self.collection.get_precondition(func);
+
         let mut function_args = Vec::<TokenStream>::new();
         for arg in &func.metadata.signature.0.inputs {
             if let syn::FnArg::Typed(pat_type) = arg {
@@ -224,7 +238,7 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
                 function_args.push(quote! { #ident.clone() });
             }
         }
-        B::make_harness_for_function(func, &function_args)
+        B::make_harness_for_function(func, &function_args, precondition)
     }
 
     /// Generate a harness function for comparing two methods.
@@ -236,6 +250,7 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
             .unwrap();
         // getter may be absent
         let getter = self.collection.getters.get(method.impl_type());
+        let precondition = self.collection.get_precondition(method);
 
         // collect constructor args
         let mut constructor_args = Vec::new();
@@ -284,6 +299,7 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
             &method_args,
             &constructor_args,
             receiver_prefix,
+            precondition,
         )
     }
 
@@ -335,6 +351,7 @@ pub trait HarnessBackend {
     fn make_harness_for_function(
         function: &CommonFunction,
         function_args: &[TokenStream],
+        precondition: Option<&Precondition>,
     ) -> TokenStream;
 
     /// Build the test function TokenStream for a method.
@@ -345,6 +362,7 @@ pub trait HarnessBackend {
         method_args: &[TokenStream],
         constructor_args: &[TokenStream],
         receiver_prefix: TokenStream,
+        precondition: Option<&Precondition>,
     ) -> TokenStream;
 
     /// Other additional code pieces needed can be added as associated functions here.

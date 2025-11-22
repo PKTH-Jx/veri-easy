@@ -8,7 +8,7 @@ use std::io::{BufRead, Write};
 
 use crate::{
     check::{CheckResult, Checker, Component},
-    defs::{CommonFunction, Path},
+    defs::{CommonFunction, Path, Precondition},
     generate::{HarnessBackend, HarnessGenerator},
     utils::run_command_and_log_error,
 };
@@ -26,6 +26,7 @@ impl HarnessBackend for KaniHarnessBackend {
     fn make_harness_for_function(
         function: &CommonFunction,
         function_args: &[TokenStream],
+        precondition: Option<&Precondition>,
     ) -> TokenStream {
         let fn_name = &function.metadata.name;
 
@@ -34,12 +35,22 @@ impl HarnessBackend for KaniHarnessBackend {
         // Function argument struct name
         let function_arg_struct = format_ident!("Args{}", fn_name.to_ident());
 
+        // If precondition is present, we may need to add assume code
+        let precondition = precondition.map(|pre| {
+            let check_fn_name = pre.check_name();
+            quote! {
+                kani::assume(#check_fn_name(#(function_arg_struct.#function_args),*));
+            }
+        });
+
         quote! {
             #[cfg(kani)]
             #[kani::proof]
             #[allow(non_snake_case)]
             pub fn #test_fn_name() {
                 let function_arg_struct = kani::any::<#function_arg_struct>();
+                // Precondition assume
+                #precondition
                 // Function call
                 let r1 = mod1::#fn_name(#(function_arg_struct.#function_args),*);
                 let r2 = mod2::#fn_name(#(function_arg_struct.#function_args),*);
@@ -55,6 +66,7 @@ impl HarnessBackend for KaniHarnessBackend {
         method_args: &[TokenStream],
         constructor_args: &[TokenStream],
         receiver_prefix: TokenStream,
+        precondition: Option<&Precondition>,
     ) -> TokenStream {
         let fn_name = &method.metadata.name;
         let constr_name = &constructor.metadata.name;
@@ -74,6 +86,14 @@ impl HarnessBackend for KaniHarnessBackend {
             }
         });
 
+        // If precondition is present, we may need to add assume code
+        let precondition = precondition.map(|pre| {
+            let check_fn_name = pre.check_name();
+            quote! {
+                kani::assume(s2.#check_fn_name(#(method_arg_struct.#method_args),*));
+            }
+        });
+
         quote! {
             #[cfg(kani)]
             #[kani::proof]
@@ -85,6 +105,8 @@ impl HarnessBackend for KaniHarnessBackend {
                 let mut s2 = mod2::#constr_name(#(constr_arg_struct.#constructor_args),*);
 
                 let method_arg_struct = kani::any::<#method_arg_struct>();
+                // Precondition assume
+                #precondition
                 // Do method call
                 let r1 = mod1::#fn_name(#receiver_prefix s1, #(method_arg_struct.#method_args),*);
                 let r2 = mod2::#fn_name(#receiver_prefix s2, #(method_arg_struct.#method_args),*);

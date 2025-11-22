@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 
 use crate::{
     check::{CheckResult, Checker, Component},
-    defs::{CommonFunction, Path},
+    defs::{CommonFunction, Path, Precondition},
     generate::{FunctionCollection, HarnessBackend, HarnessGenerator},
     utils::run_command_and_log_error,
 };
@@ -26,6 +26,7 @@ impl HarnessBackend for DFHarnessBackend {
     fn make_harness_for_function(
         function: &CommonFunction,
         function_args: &[TokenStream],
+        _precondition: Option<&Precondition>,
     ) -> TokenStream {
         let fn_name = &function.metadata.name;
         let fn_name_string = fn_name.to_string();
@@ -70,6 +71,7 @@ impl HarnessBackend for DFHarnessBackend {
         method_args: &[TokenStream],
         constructor_args: &[TokenStream],
         receiver_prefix: TokenStream,
+        _precondition: Option<&Precondition>,
     ) -> TokenStream {
         let fn_name = &method.metadata.name;
         let fn_name_string = fn_name.to_string();
@@ -154,14 +156,14 @@ impl HarnessBackend for DFHarnessBackend {
         }
     }
 
-    fn additional_code(classifier: &FunctionCollection) -> TokenStream {
+    fn additional_code(collection: &FunctionCollection) -> TokenStream {
         // Generate dispatch function as additional code
-        let test_fns = classifier
+        let test_fns = collection
             .functions
             .iter()
             .map(|func| format!("check_{}", func.metadata.name.to_ident()))
             .chain(
-                classifier
+                collection
                     .methods
                     .iter()
                     .map(|method| format!("check_{}", method.metadata.name.to_ident())),

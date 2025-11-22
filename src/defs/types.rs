@@ -10,13 +10,46 @@ pub enum Type {
 }
 
 impl Type {
+    /// Parse type from its path representation.
+    pub fn from_path(path: Path) -> Self {
+        if path.last().unwrap().contains('<') {
+            // Generic type
+            let last = path.last().unwrap();
+            let base_name = last.split('<').next().unwrap().to_string();
+            let base_path = {
+                let mut p = path.clone();
+                *p.0.last_mut().unwrap() = base_name;
+                p
+            };
+            let generics_str = last
+                .split('<')
+                .nth(1)
+                .unwrap()
+                .trim_end_matches('>')
+                .to_string();
+            // Split generics by comma
+            let generic_types: Vec<Type> = generics_str
+                .split(',')
+                .map(|s| Type::from_path(Path(vec![s.trim().to_string()])))
+                .collect();
+            Type::Generic(GenericType {
+                path: base_path,
+                generics: generic_types,
+            })
+        } else {
+            // Precise type
+            Type::Precise(PreciseType(path))
+        }
+    }
+
     /// Get the path representation of the type.
-    pub fn as_path(&self) -> Path {
+    pub fn to_path(&self) -> Path {
         match self {
-            Type::Generic(generic) => generic.as_path(),
+            Type::Generic(generic) => generic.to_path(),
             Type::Precise(precise) => precise.0.clone(),
         }
     }
+
     /// Check equality ignoring generic parameters.
     pub fn eq_ignore_generics(&self, other: &Type) -> bool {
         match (self, other) {
@@ -72,13 +105,13 @@ pub struct GenericType {
 
 impl GenericType {
     /// Get the path representation of the generic type.
-    pub fn as_path(&self) -> Path {
+    pub fn to_path(&self) -> Path {
         let mut full_path = self.path.clone();
         if !self.generics.is_empty() {
             let generics_str = self
                 .generics
                 .iter()
-                .map(|ty| ty.as_path().to_string())
+                .map(|ty| ty.to_path().to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
             full_path

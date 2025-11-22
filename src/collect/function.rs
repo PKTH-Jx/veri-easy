@@ -104,7 +104,7 @@ impl<'ast> Visit<'ast> for FunctionCollector<'ast> {
                 Type::Generic(g) => g.path = self.resolver.resolve_path(&g.path),
                 Type::Precise(p) => p.0 = self.resolver.resolve_path(&p.0),
             }
-            let name = self_ty.as_path().join(i.sig.ident.to_string());
+            let name = self_ty.to_path().join(i.sig.ident.to_string());
             self.functions.push(Function {
                 name,
                 impl_type: Some(self_ty),

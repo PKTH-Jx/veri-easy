@@ -1,6 +1,7 @@
 use crate::{
     check::{Checker, Component, Source},
     components::{Alive2, DifferentialFuzzing, Identical, Kani, PropertyBasedTesting},
+    defs::{Path, Precondition},
 };
 
 mod check;
@@ -13,6 +14,8 @@ mod utils;
 
 // In real usage, create Sources from file paths and run Checker with steps.
 fn main() -> anyhow::Result<()> {
+    log::init_logger(log::LogLevel::Normal);
+
     let s1 = Source::open("v1_impl.rs")?;
     let s2 = Source::open("v2_impl.rs")?;
     let steps: Vec<Box<dyn Component>> = vec![
@@ -25,7 +28,20 @@ fn main() -> anyhow::Result<()> {
         )),
     ];
 
-    log::init_logger(log::LogLevel::Normal);
+    let precond_gen = precond_translator::parse_file_and_create_generator("v2_proof.rs")?;
+
+    let gen_code = precond_gen.generate_all();
+    let pretty_code = prettyplease::unparse(&syn::parse2(gen_code).unwrap());
+    std::fs::write("pre.rs", pretty_code)?;
+
+    let mut precondtions = Vec::new();
+    for func in precond_gen.get_function_preconds() {
+        precondtions.push(Precondition::new(Path::from_str(&func), false));
+    }
+    for method in precond_gen.get_method_preconds() {
+        precondtions.push(Precondition::new(Path::from_str(&method), true));
+    }
+
     log!(
         Brief,
         Critical,
@@ -34,7 +50,7 @@ fn main() -> anyhow::Result<()> {
         s2.path
     );
 
-    let mut checker = Checker::new(s1, s2, steps);
+    let mut checker = Checker::new(s1, s2, steps, precondtions);
     log!(Normal, Info, "Logging initial state:");
     checker.print_state();
     log!(Normal, Simple, "");

@@ -3,7 +3,7 @@ use anyhow::Error;
 
 use crate::{
     collect::{FunctionCollector, TraitCollector, TypeCollector},
-    defs::{CommonFunction, Function, InstantiatedType, Path, PreciseType, Type},
+    defs::{CommonFunction, Function, InstantiatedType, Path, PreciseType, Precondition, Type},
     log,
 };
 
@@ -100,14 +100,21 @@ pub struct Checker {
     pub verified_funcs: Vec<CommonFunction>,
     /// Functions that has been checked by testing components.
     pub tested_funcs: Vec<CommonFunction>,
-    /// Constructors.
+    /// Constructors (not checked directly).
     pub constructors: Vec<CommonFunction>,
-    /// Getters.
+    /// Getters (not checked directly).
     pub getters: Vec<CommonFunction>,
+    /// Preconditions (used to filter out tests that do not satisfy preconditions).
+    pub preconditions: Vec<Precondition>,
 }
 
 impl Checker {
-    pub fn new(src1: Source, src2: Source, steps: Vec<Box<dyn Component>>) -> Self {
+    pub fn new(
+        src1: Source,
+        src2: Source,
+        steps: Vec<Box<dyn Component>>,
+        preconditions: Vec<Precondition>,
+    ) -> Self {
         let mut checker = Self {
             src1,
             src2,
@@ -117,6 +124,7 @@ impl Checker {
             tested_funcs: Vec::new(),
             constructors: Vec::new(),
             getters: Vec::new(),
+            preconditions,
         };
         checker.preprocess();
         checker
@@ -275,24 +283,48 @@ impl Checker {
         // in the common functions.
         let mut updated_common_funcs = Vec::new();
         for func in common_funcs {
+            let mut renamed = false;
             if let Some(impl_type) = &func.metadata.impl_type {
+                // Check against instantiated types
                 for inst_type in &self.src1.inst_types {
                     if inst_type.concrete.eq_ignore_generics(impl_type) {
                         let mut func = func.clone();
                         // Update the impl_type to the instantiated alias type
                         func.metadata.impl_type =
                             Some(Type::Precise(PreciseType(inst_type.alias.clone())));
-                        func.metadata.name = inst_type
-                            .alias
-                            .clone()
-                            .join(func.metadata.signature.0.ident.to_string());
+                        func.metadata.name = inst_type.alias.clone().join(func.metadata.ident());
                         updated_common_funcs.push(func);
+                        renamed = true;
                     }
                 }
-                continue;
             }
-            updated_common_funcs.push(func);
+            if !renamed {
+                updated_common_funcs.push(func);
+            }
         }
+
+        // Update precondition check functions similarly
+        let mut updated_preconditions = Vec::new();
+        for func in &self.preconditions {
+            let mut renamed = false;
+            if let Some(impl_type) = &func.impl_type {
+                // Check against instantiated types
+                for inst_type in &self.src1.inst_types {
+                    if inst_type.concrete.eq_ignore_generics(impl_type) {
+                        let mut func = func.clone();
+                        // Update the impl_type to the instantiated alias type
+                        func.impl_type = Some(Type::Precise(PreciseType(inst_type.alias.clone())));
+                        func.name = inst_type.alias.clone().join(func.ident());
+                        updated_preconditions.push(func);
+                        renamed = true;
+                    }
+                }
+            }
+            if !renamed {
+                updated_preconditions.push(func.clone());
+            }
+        }
+        self.preconditions = updated_preconditions;
 
         // Get constructor functions (`verieasy_new`) from common functions
         self.constructors = updated_common_funcs
@@ -309,5 +341,7 @@ impl Checker {
 
         updated_common_funcs.retain(|f| !f.metadata.is_constructor() && !f.metadata.is_getter());
         self.unchecked_funcs = updated_common_funcs;
+
+        println!("{:?}", self.preconditions);
     }
 }

@@ -41,11 +41,7 @@ pub struct FunctionMetadata {
 
 impl FunctionMetadata {
     /// Create a new FunctionMetadata.
-    pub fn new(
-        name: Path,
-        signature: Signature,
-        impl_type: Option<Type>,
-    ) -> Self {
+    pub fn new(name: Path, signature: Signature, impl_type: Option<Type>) -> Self {
         Self {
             name,
             signature,
@@ -81,6 +77,7 @@ impl Debug for FunctionMetadata {
 }
 
 /// Function metadata and body.
+#[derive(Clone)]
 pub struct Function {
     /// Metadata of the function.
     pub metadata: FunctionMetadata,
@@ -130,6 +127,53 @@ impl CommonFunction {
 impl Debug for CommonFunction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self.metadata.name)
+    }
+}
+
+/// Precondition for a function.
+#[derive(Clone)]
+pub struct Precondition {
+    /// Name of the **original** function (The check function name is derived from this).
+    pub name: Path,
+    /// Implementation type (if any).
+    pub impl_type: Option<Type>,
+}
+
+impl Precondition {
+    /// Construct from the Path of the original function.
+    pub fn new(name: Path, is_method: bool) -> Self {
+        let impl_type = if is_method {
+            if name.0.len() >= 2 {
+                Some(Type::from_path(name.parent().unwrap()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Self { name, impl_type }
+    }
+
+    /// Get the function identifier.
+    pub fn ident(&self) -> String {
+        self.name.0.last().cloned().unwrap()
+    }
+
+    /// The name of the check function.
+    pub fn check_name(&self) -> Path {
+        if self.impl_type.is_some() {
+            Path(vec![format!("verieasy_pre_{}", self.ident())])
+        } else {
+            let mut check_name = self.name.clone();
+            *check_name.0.last_mut().unwrap() = format!("verieasy_pre_{}", self.ident());
+            check_name
+        }
+    }
+}
+
+impl Debug for Precondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Precondition {:?}", self.name)
     }
 }
 

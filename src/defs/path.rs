@@ -21,6 +21,22 @@ impl Path {
         self.0.join("___")
     }
 
+    /// Get the last segment of the path.
+    pub fn last(&self) -> Option<&String> {
+        self.0.last()
+    }
+
+    /// Get a new path by removing the last segment.
+    pub fn parent(&self) -> Option<Path> {
+        if self.0.is_empty() {
+            None
+        } else {
+            let mut parent_segments = self.0.clone();
+            parent_segments.pop();
+            Some(Path(parent_segments))
+        }
+    }
+
     /// Parse from a string representation with "::" separator.
     pub fn from_str(s: &str) -> Self {
         let segments: Vec<String> = s.split("::").map(|seg| seg.to_string()).collect();
