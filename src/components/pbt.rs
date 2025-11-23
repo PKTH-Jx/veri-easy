@@ -152,14 +152,11 @@ impl HarnessBackend for PBTHarnessBackend {
             #![allow(unused)]
             #![allow(non_snake_case)]
             #![allow(non_camel_case_types)]
-
             mod mod1;
             mod mod2;
-
             use proptest::prelude::*;
-            use std::ops::Range;
-            #(#imports)*
 
+            #(#imports)*
             #(#args_structs)*
             proptest! {
                 #![proptest_config(ProptestConfig::with_cases(100000))]

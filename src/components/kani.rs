@@ -128,7 +128,6 @@ impl HarnessBackend for KaniHarnessBackend {
             #![allow(unused)]
             #![allow(non_snake_case)]
             #![allow(non_camel_case_types)]
-            use std::ops::Range;
             mod mod1;
             mod mod2;
 
@@ -261,8 +260,8 @@ kani = "*"
 
     /// Remove the harness project.
     fn remove_harness_project(&self, harness_path: &str) -> anyhow::Result<()> {
-        std::fs::remove_dir_all(harness_path)
-            .map_err(|_| anyhow!("Failed to remove harness file"))?;
+        // std::fs::remove_dir_all(harness_path)
+        //     .map_err(|_| anyhow!("Failed to remove harness file"))?;
         Ok(())
     }
 }

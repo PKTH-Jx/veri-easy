@@ -203,13 +203,10 @@ impl HarnessBackend for DFHarnessBackend {
             #![allow(unused)]
             #![allow(non_snake_case)]
             #![allow(non_camel_case_types)]
-
             mod mod1;
             mod mod2;
 
-            use std::ops::Range;
             #(#imports)*
-
             #(#args_structs)*
             #(#functions)*
             #(#methods)*

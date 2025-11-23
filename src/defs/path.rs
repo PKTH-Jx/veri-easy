@@ -67,6 +67,23 @@ impl From<syn::Path> for Path {
     }
 }
 
+impl From<Path> for syn::Path {
+    fn from(path: Path) -> Self {
+        let segments: Vec<syn::PathSegment> = path
+            .0
+            .into_iter()
+            .map(|seg| syn::PathSegment {
+                ident: syn::Ident::new(&seg, proc_macro2::Span::call_site()),
+                arguments: syn::PathArguments::None,
+            })
+            .collect();
+        syn::Path {
+            leading_colon: None,
+            segments: syn::punctuated::Punctuated::from_iter(segments),
+        }
+    }
+}
+
 impl quote::ToTokens for Path {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         let ts = TokenStream::from_str(&self.to_string()).unwrap();

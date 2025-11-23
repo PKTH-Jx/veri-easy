@@ -1,9 +1,11 @@
 //! Collect functions from a Rust program.
 
-use super::path::PathResolver;
-use crate::defs::{Path, Type};
+use crate::{
+    collect::path::ModuleStack,
+    defs::{Path, Type},
+};
 use syn::{
-    Block, File, ImplItemFn, ItemFn, ItemImpl, ItemMod, ItemUse, Signature,
+    Block, File, ImplItemFn, ItemFn, ItemImpl, ItemMod, Signature,
     visit::{self, Visit},
 };
 
@@ -25,8 +27,8 @@ pub struct FunctionCollector<'ast> {
     functions: Vec<Function>,
     /// Currently visited impl block.
     impl_block: Option<&'ast ItemImpl>,
-    /// Path resolver
-    resolver: PathResolver,
+    /// Module stack.
+    module: ModuleStack,
 }
 
 impl<'ast> FunctionCollector<'ast> {
@@ -34,7 +36,7 @@ impl<'ast> FunctionCollector<'ast> {
         Self {
             functions: Vec::new(),
             impl_block: None,
-            resolver: PathResolver::new(),
+            module: ModuleStack::new(),
         }
     }
     pub fn collect(mut self, syntax: &'ast File) -> Vec<crate::defs::Function> {
@@ -58,13 +60,9 @@ impl<'ast> FunctionCollector<'ast> {
 
 impl<'ast> Visit<'ast> for FunctionCollector<'ast> {
     fn visit_item_mod(&mut self, i: &'ast ItemMod) {
-        self.resolver.enter_module(i);
+        self.module.push(&i.ident.to_string());
         visit::visit_item_mod(self, i);
-        self.resolver.exit_module();
-    }
-
-    fn visit_item_use(&mut self, i: &'ast ItemUse) {
-        self.resolver.parse_use_tree(&i.tree, Path::empty());
+        self.module.pop();
     }
 
     fn visit_item_fn(&mut self, i: &'ast ItemFn) {
@@ -75,7 +73,7 @@ impl<'ast> Visit<'ast> for FunctionCollector<'ast> {
             return;
         } // Skip functions marked with #[ignore]
 
-        let name = self.resolver.concat_module(&i.sig.ident.to_string());
+        let name = self.module.concat(&i.sig.ident.to_string());
         self.functions.push(Function {
             name,
             signature: i.sig.clone(),
@@ -99,11 +97,8 @@ impl<'ast> Visit<'ast> for FunctionCollector<'ast> {
         } // Skip functions marked with #[ignore]
 
         let impl_block = self.impl_block.cloned().unwrap();
-        if let Ok(mut self_ty) = Type::try_from(*impl_block.self_ty) {
-            match &mut self_ty {
-                Type::Generic(g) => g.path = self.resolver.resolve_path(&g.path),
-                Type::Precise(p) => p.0 = self.resolver.resolve_path(&p.0),
-            }
+        if let Ok(self_ty) = Type::try_from(*impl_block.self_ty) {
+            // self_ty is already resolved by `PathResolver`
             let name = self_ty.to_path().join(i.sig.ident.to_string());
             self.functions.push(Function {
                 name,

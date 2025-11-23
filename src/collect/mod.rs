@@ -1,10 +1,11 @@
 //! Collect functions from two programs.
 
 mod function;
-mod generics;
 mod path;
 mod symbol;
+mod types;
 
 pub use function::FunctionCollector;
-pub use generics::TypeCollector;
-pub use symbol::TraitCollector;
+pub use path::PathResolver;
+pub use symbol::SymbolCollector;
+pub use types::TypeCollector;

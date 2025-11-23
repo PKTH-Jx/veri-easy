@@ -2,7 +2,7 @@
 use anyhow::Error;
 
 use crate::{
-    collect::{FunctionCollector, TraitCollector, TypeCollector},
+    collect::{FunctionCollector, PathResolver, SymbolCollector, TypeCollector},
     defs::{CommonFunction, Function, InstantiatedType, Path, PreciseType, Precondition, Type},
     log,
 };
@@ -26,13 +26,15 @@ impl Source {
     pub fn open(path: &str) -> anyhow::Result<Self> {
         let content =
             std::fs::read_to_string(&path).map_err(|_| anyhow::anyhow!("Failed to read source"))?;
-        let syntax = syn::parse_file(&content)
+        let mut syntax = syn::parse_file(&content)
             .map_err(|_| anyhow::anyhow!("Failed to parse source file"))?;
 
+        // Resolve paths
+        PathResolver::new().resolve_paths(&mut syntax);
         // Collect functions
         let unique_funcs = FunctionCollector::new().collect(&syntax);
         // Collect symbols
-        let symbols = TraitCollector::new().collect(&syntax);
+        let symbols = SymbolCollector::new().collect(&syntax);
         // Collect instantiated generic types
         let inst_types = TypeCollector::new().collect(&syntax);
 
