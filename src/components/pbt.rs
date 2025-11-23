@@ -15,10 +15,12 @@ use crate::{
 };
 
 /// PBT harness generator backend.
-struct PBTHarnessBackend;
+struct PBTHarnessBackend {
+    cases: usize,
+}
 
 impl HarnessBackend for PBTHarnessBackend {
-    fn arg_struct_attrs() -> TokenStream {
+    fn arg_struct_attrs(&self) -> TokenStream {
         quote! {
             #[derive(Debug)]
             #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
@@ -26,6 +28,7 @@ impl HarnessBackend for PBTHarnessBackend {
     }
 
     fn make_harness_for_function(
+        &self,
         function: &CommonFunction,
         function_args: &[TokenStream],
         _precondition: Option<&Precondition>,
@@ -62,6 +65,7 @@ impl HarnessBackend for PBTHarnessBackend {
     }
 
     fn make_harness_for_method(
+        &self,
         method: &CommonFunction,
         constructor: &CommonFunction,
         getter: Option<&CommonFunction>,
@@ -143,12 +147,14 @@ impl HarnessBackend for PBTHarnessBackend {
     }
 
     fn finalize(
+        &self,
         imports: Vec<TokenStream>,
         args_structs: Vec<TokenStream>,
         functions: Vec<TokenStream>,
         methods: Vec<TokenStream>,
         _additional: TokenStream,
     ) -> TokenStream {
+        let cases = self.cases;
         quote! {
             #![allow(unused)]
             #![allow(non_snake_case)]
@@ -160,7 +166,7 @@ impl HarnessBackend for PBTHarnessBackend {
             #(#imports)*
             #(#args_structs)*
             proptest! {
-                #![proptest_config(ProptestConfig::with_cases(100000))]
+                #![proptest_config(ProptestConfig::with_cases(#cases))]
                 #(#functions)*
                 #(#methods)*
             }
@@ -184,7 +190,12 @@ impl PropertyBasedTesting {
     }
 
     fn generate_harness_file(&self, checker: &Checker) -> (Vec<Path>, TokenStream) {
-        let generator = PBTHarnessGenerator::new(checker);
+        let generator = PBTHarnessGenerator::new(
+            checker,
+            PBTHarnessBackend {
+                cases: self.config.test_cases,
+            },
+        );
         // Collect functions and methods that are checked in harness
         let functions = generator
             .collection

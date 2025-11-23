@@ -18,13 +18,14 @@ use crate::{
 struct DFHarnessBackend;
 
 impl HarnessBackend for DFHarnessBackend {
-    fn arg_struct_attrs() -> TokenStream {
+    fn arg_struct_attrs(&self) -> TokenStream {
         quote! {
             #[derive(Debug, serde::Deserialize)]
         }
     }
 
     fn make_harness_for_function(
+        &self,
         function: &CommonFunction,
         function_args: &[TokenStream],
         _precondition: Option<&Precondition>,
@@ -66,6 +67,7 @@ impl HarnessBackend for DFHarnessBackend {
     }
 
     fn make_harness_for_method(
+        &self,
         method: &CommonFunction,
         constructor: &CommonFunction,
         getter: Option<&CommonFunction>,
@@ -157,7 +159,7 @@ impl HarnessBackend for DFHarnessBackend {
         }
     }
 
-    fn additional_code(collection: &FunctionCollection) -> TokenStream {
+    fn additional_code(&self, collection: &FunctionCollection) -> TokenStream {
         // Generate dispatch function as additional code
         let test_fns = collection
             .functions
@@ -194,6 +196,7 @@ impl HarnessBackend for DFHarnessBackend {
     }
 
     fn finalize(
+        &self,
         imports: Vec<TokenStream>,
         args_structs: Vec<TokenStream>,
         functions: Vec<TokenStream>,
@@ -231,7 +234,7 @@ impl DifferentialFuzzing {
     }
 
     fn generate_harness_file(&self, checker: &Checker) -> (Vec<Path>, TokenStream) {
-        let generator = DFHarnessGenerator::new(checker);
+        let generator = DFHarnessGenerator::new(checker, DFHarnessBackend);
         // Collect functions and methods that are checked in harness
         let functions = generator
             .collection

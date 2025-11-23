@@ -18,13 +18,14 @@ use crate::{
 struct KaniHarnessBackend;
 
 impl HarnessBackend for KaniHarnessBackend {
-    fn arg_struct_attrs() -> TokenStream {
+    fn arg_struct_attrs(&self) -> TokenStream {
         quote! {
             #[derive(Debug, kani::Arbitrary)]
         }
     }
 
     fn make_harness_for_function(
+        &self,
         function: &CommonFunction,
         function_args: &[TokenStream],
         precondition: Option<&Precondition>,
@@ -61,6 +62,7 @@ impl HarnessBackend for KaniHarnessBackend {
     }
 
     fn make_harness_for_method(
+        &self,
         method: &CommonFunction,
         constructor: &CommonFunction,
         getter: Option<&CommonFunction>,
@@ -119,6 +121,7 @@ impl HarnessBackend for KaniHarnessBackend {
     }
 
     fn finalize(
+        &self,
         imports: Vec<TokenStream>,
         args_structs: Vec<TokenStream>,
         functions: Vec<TokenStream>,
@@ -158,7 +161,7 @@ impl Kani {
 
     /// Generate harness code for Kani.
     fn generate_harness(&self, checker: &Checker) -> TokenStream {
-        let generator = KaniHarnessGenerator::new(checker);
+        let generator = KaniHarnessGenerator::new(checker, KaniHarnessBackend);
         generator.generate_harness()
     }
 

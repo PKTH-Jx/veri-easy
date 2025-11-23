@@ -147,12 +147,12 @@ pub struct HarnessGenerator<B: HarnessBackend> {
     /// Imports from mod2
     pub mod2_imports: Vec<Path>,
     /// Backend marker
-    _backend: std::marker::PhantomData<B>,
+    pub backend: B,
 }
 
 impl<B: HarnessBackend> HarnessGenerator<B> {
     /// Create a new harness generator for the given functions.
-    pub fn new(checker: &Checker) -> Self {
+    pub fn new(checker: &Checker, backend: B) -> Self {
         let mut collection = FunctionCollection::new(
             checker.unchecked_funcs.clone(),
             checker.constructors.clone(),
@@ -165,7 +165,7 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
             collection,
             mod1_imports: checker.src1.symbols.clone(),
             mod2_imports: checker.src2.symbols.clone(),
-            _backend: std::marker::PhantomData,
+            backend,
         }
     }
 
@@ -178,7 +178,7 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
                 fields.push(quote! { #arg });
             }
         }
-        let attrs = B::arg_struct_attrs();
+        let attrs = self.backend.arg_struct_attrs();
         quote! {
             #attrs
             pub struct #struct_name {
@@ -238,7 +238,8 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
                 function_args.push(quote! { #ident.clone() });
             }
         }
-        B::make_harness_for_function(func, &function_args, precondition)
+        self.backend
+            .make_harness_for_function(func, &function_args, precondition)
     }
 
     /// Generate a harness function for comparing two methods.
@@ -292,7 +293,7 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
             quote! { #reference #mut_tok }
         };
 
-        B::make_harness_for_method(
+        self.backend.make_harness_for_method(
             method,
             constructor,
             getter,
@@ -336,19 +337,21 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
             .iter()
             .map(|method| self.generate_harness_for_method(method))
             .collect::<Vec<_>>();
-        let additional = B::additional_code(&self.collection);
+        let additional = self.backend.additional_code(&self.collection);
 
-        B::finalize(imports, arg_structs, functions, methods, additional)
+        self.backend
+            .finalize(imports, arg_structs, functions, methods, additional)
     }
 }
 
 /// The trait capturing differences between different check/test harness backends.
 pub trait HarnessBackend {
     /// Attributes / derives to put on generated `Args*` structs.
-    fn arg_struct_attrs() -> TokenStream;
+    fn arg_struct_attrs(&self) -> TokenStream;
 
     /// Build the test function TokenStream for a free-standing function.
     fn make_harness_for_function(
+        &self,
         function: &CommonFunction,
         function_args: &[TokenStream],
         precondition: Option<&Precondition>,
@@ -356,6 +359,7 @@ pub trait HarnessBackend {
 
     /// Build the test function TokenStream for a method.
     fn make_harness_for_method(
+        &self,
         method: &CommonFunction,
         constructor: &CommonFunction,
         getter: Option<&CommonFunction>,
@@ -366,12 +370,13 @@ pub trait HarnessBackend {
     ) -> TokenStream;
 
     /// Other additional code pieces needed can be added as associated functions here.
-    fn additional_code(_classifier: &FunctionCollection) -> TokenStream {
+    fn additional_code(&self, _classifier: &FunctionCollection) -> TokenStream {
         quote! {}
     }
 
     /// Final wrapper given all pieces: used to assemble final file.
     fn finalize(
+        &self,
         imports: Vec<TokenStream>,
         args_structs: Vec<TokenStream>,
         functions: Vec<TokenStream>,

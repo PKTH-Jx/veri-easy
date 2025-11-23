@@ -1,4 +1,4 @@
-components = ["Identical", "Kani", "PBT", "DiffFuzz", "Alive2"]
+components = ["Identical", "Kani", "PBT", "DiffFuzz"]
 
 [kani]
 harness_path = "kani_harness"

@@ -114,7 +114,7 @@ pub struct PBTConfig {
     /// PBT output path.
     pub output_path: String,
     /// Test cases.
-    pub test_cases: u32,
+    pub test_cases: usize,
     /// Keep PBT harness project.
     pub keep_harness: bool,
     /// Keep PBT output file.
