@@ -1,44 +1,100 @@
+use clap::Parser;
+
 use crate::{
-    check::{Checker, Component, Source},
+    check::{Checker, Source},
     collect::collect_preconds,
-    components::{Alive2, DifferentialFuzzing, Identical, Kani, PropertyBasedTesting},
+    config::{VerieasyConfig, WorkflowConfig},
 };
 
 mod check;
 mod collect;
 mod components;
+mod config;
 mod defs;
 mod generate;
 mod log;
 mod utils;
 
-// In real usage, create Sources from file paths and run Checker with steps.
-fn main() -> anyhow::Result<()> {
-    log::init_logger(log::LogLevel::Normal);
+fn main() {
+    // Parse global configuration
+    let config = VerieasyConfig::parse();
 
-    // Assume `s1` is the original source, `s2` is the modified source.
-    let s1 = Source::open("v1_impl.rs")?;
-    let mut s2 = Source::open("v2_impl.rs")?;
-    let steps: Vec<Box<dyn Component>> = vec![
-        Box::new(Identical),
-        Box::new(Kani),
-        Box::new(PropertyBasedTesting),
-        Box::new(DifferentialFuzzing),
-        Box::new(Alive2::new(
-            "/Users/jingx/Dev/os/verif/cmpir/alive2/build/alive-tv".to_owned(),
-        )),
-    ];
+    // Initialize logger
+    log::init_logger(config.log);
+    log!(
+        Brief,
+        Critical,
+        "Veri-easy version {}",
+        env!("CARGO_PKG_VERSION")
+    );
+    log!(Brief, Info, "Log level set to {:?}", config.log);
 
-    let res = collect_preconds("v2_proof.rs");
-    let (code, preconditions) = match res {
-        Ok((code, preconditions)) => (code, preconditions),
-        Err(e) => {
-            log!(Brief, Error, "Failed to collect preconditions: {}", e);
-            (String::new(), Vec::new())
+    // Load workflow configuration
+    let res = WorkflowConfig::parse(&config.config);
+    if let Err(e) = &res {
+        log!(
+            Brief,
+            Error,
+            "Failed to parse workflow configuration: {}",
+            e
+        );
+        return;
+    }
+    let workflow_config = res.unwrap();
+    log!(Brief, Simple, "");
+    workflow_config.log();
+
+    // Construct workflow components
+    let components = workflow_config.construct_workflow();
+
+    // Load source files
+    let res = Source::open(&config.file1);
+    if let Err(e) = &res {
+        log!(
+            Brief,
+            Error,
+            "Failed to open source file {}: {}",
+            &config.file1,
+            e
+        );
+        return;
+    }
+    let s1 = res.unwrap();
+    let res = Source::open(&config.file2);
+    if let Err(e) = &res {
+        log!(
+            Brief,
+            Error,
+            "Failed to open source file {}: {}",
+            &config.file2,
+            e
+        );
+        return;
+    }
+    let mut s2 = res.unwrap();
+
+    // Collect preconditions
+    let (precond_code, preconditions) = if let Some(precond_path) = &config.preconditions {
+        match collect_preconds(precond_path) {
+            Ok((code, preconditions)) => (code, preconditions),
+            Err(e) => {
+                log!(
+                    Brief,
+                    Error,
+                    "Failed to collect preconditions from {}: {}",
+                    precond_path,
+                    e
+                );
+                (String::new(), Vec::new())
+            }
         }
+    } else {
+        (String::new(), Vec::new())
     };
-    s2.append_content(&code);
+    // Append preconditions to source 2
+    s2.append_content(&precond_code);
 
+    log!(Brief, Simple, "");
     log!(
         Brief,
         Critical,
@@ -47,11 +103,11 @@ fn main() -> anyhow::Result<()> {
         s2.path
     );
 
-    let mut checker = Checker::new(s1, s2, steps, preconditions);
+    // Create checker and run workflow
+    let mut checker = Checker::new(s1, s2, components, preconditions);
     log!(Normal, Info, "Logging initial state:");
     checker.print_state();
     log!(Normal, Simple, "");
-    checker.run_all();
 
-    Ok(())
+    checker.run_all();
 }

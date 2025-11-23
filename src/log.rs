@@ -1,28 +1,32 @@
 //! Logger utilities for veri-easy.
 
+use clap::ValueEnum;
 use colored::Colorize;
 use std::sync::OnceLock;
 
 /// Logging level.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum LogLevel {
     /// No logging.
     Off,
-    /// Brief logging, including
-    ///
-    /// - Component name and note
-    /// - Check result of each component
+    /// Brief logging, including components and check results.
     Brief,
-    /// Normal logging, including
-    ///
-    /// - All brief logs
-    /// - Checker state after each component
+    /// Normal logging, including all brief logs and checker states.
     Normal,
-    /// Verbose logging, including
-    ///
-    /// - All normal logs
-    /// - Detailed messages from components
+    /// Verbose logging, including all normal logs and detailed messages from components.
     Verbose,
+}
+
+impl From<&str> for LogLevel {
+    fn from(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "off" => LogLevel::Off,
+            "brief" => LogLevel::Brief,
+            "normal" => LogLevel::Normal,
+            "verbose" => LogLevel::Verbose,
+            _ => LogLevel::Normal,
+        }
+    }
 }
 
 /// Message type.

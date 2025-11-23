@@ -9,20 +9,22 @@ use syn::{
 
 use crate::{
     check::{CheckResult, Checker, Component},
+    config::Alive2Config,
     defs::Path,
 };
 
 /// Alive2 step: use alive-tv to check function equivalence.
 pub struct Alive2 {
-    /// Alive-tv path
-    pub path: String,
+    config: Alive2Config,
 }
 
 impl Alive2 {
-    pub fn new(path: String) -> Self {
-        Self { path }
+    /// Create a new Alive2 component with the given configuration.
+    pub fn new(config: Alive2Config) -> Self {
+        Self { config }
     }
 
+    /// Compile the source file to LLVM IR with exported function names.
     fn compile_to_llvm_ir(&self, src_path: &str, output_path: &str) -> anyhow::Result<()> {
         let original =
             std::fs::read_to_string(src_path).map_err(|_| anyhow!("Failed to read source"))?;
@@ -46,14 +48,16 @@ impl Alive2 {
         std::fs::remove_file(tmp_path).map_err(|_| anyhow!("Failed to remove tmp file"))
     }
 
+    /// Remove the generated LLVM IR file.
     fn remove_llvm_ir(&self, ir_path: &str) -> anyhow::Result<()> {
         std::fs::remove_file(ir_path).map_err(|_| anyhow!("Failed to remove llvm-ir"))
     }
 
+    /// Run alive-tv on the two LLVM IR files and save the output.
     fn run_alive2(&self, ir1: &str, ir2: &str, output_path: &str) -> anyhow::Result<()> {
         let output_file =
             std::fs::File::create(output_path).map_err(|_| anyhow!("Failed to create tmp file"))?;
-        Command::new(self.path.clone())
+        Command::new(self.config.alive2_path.clone())
             .args([ir1, ir2])
             .stdout(output_file)
             .status()
@@ -61,6 +65,7 @@ impl Alive2 {
         Ok(())
     }
 
+    /// Analyze the output of alive-tv and produce a CheckResult.
     fn analyze_alive2_output(&self, output_path: &str) -> CheckResult {
         let mut res = CheckResult {
             status: Ok(()),
@@ -88,6 +93,12 @@ impl Alive2 {
         }
 
         res
+    }
+
+    /// Remove the alive2 output file.
+    fn remove_alive2_output(&self) -> anyhow::Result<()> {
+        std::fs::remove_file(&self.config.output_path)
+            .map_err(|_| anyhow!("Failed to remove alive2 output file"))
     }
 }
 
@@ -117,18 +128,22 @@ impl Component for Alive2 {
             return CheckResult::failed(e);
         }
 
-        let output_path = "alive2.tmp";
-        let res = self.run_alive2(out1, out2, output_path);
+        let res = self.run_alive2(out1, out2, &self.config.output_path);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
-        let check_res = self.analyze_alive2_output(output_path);
+        let check_res = self.analyze_alive2_output(&self.config.output_path);
 
         if let Err(e) = self.remove_llvm_ir(out1) {
             return CheckResult::failed(e);
         }
         if let Err(e) = self.remove_llvm_ir(out2) {
             return CheckResult::failed(e);
+        }
+        if !self.config.keep_output {
+            if let Err(e) = self.remove_alive2_output() {
+                return CheckResult::failed(e);
+            }
         }
 
         check_res

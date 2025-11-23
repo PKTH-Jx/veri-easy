@@ -4,13 +4,14 @@ use anyhow::anyhow;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use regex::Regex;
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 
 use crate::{
     check::{CheckResult, Checker, Component},
+    config::KaniConfig,
     defs::{CommonFunction, Path, Precondition},
     generate::{HarnessBackend, HarnessGenerator},
-    utils::run_command_and_log_error,
+    utils::{create_harness_project, run_command_and_log_error},
 };
 
 /// Kani harness generator backend.
@@ -145,9 +146,16 @@ impl HarnessBackend for KaniHarnessBackend {
 type KaniHarnessGenerator = HarnessGenerator<KaniHarnessBackend>;
 
 /// Kani step: use Kani model-checker to check function equivalence.
-pub struct Kani;
+pub struct Kani {
+    config: KaniConfig,
+}
 
 impl Kani {
+    /// Create a new Kani component with the given configuration.
+    pub fn new(config: KaniConfig) -> Self {
+        Self { config }
+    }
+
     /// Generate harness code for Kani.
     fn generate_harness(&self, checker: &Checker) -> TokenStream {
         let generator = KaniHarnessGenerator::new(checker);
@@ -155,42 +163,13 @@ impl Kani {
     }
 
     /// Create a cargo project for Kani harness.
-    ///
-    /// Dir structure:
-    ///
-    /// harness_path
-    /// ├── Cargo.toml
-    /// └── src
-    ///     ├── main.rs
-    ///     ├── mod1.rs
-    ///     └── mod2.rs
     fn create_harness_project(
         &self,
         checker: &Checker,
         harness: TokenStream,
         harness_path: &str,
     ) -> anyhow::Result<()> {
-        run_command_and_log_error("cargo", &["new", "--bin", "--vcs", "none", harness_path])?;
-
-        // Write rust files
-        std::fs::File::create(harness_path.to_owned() + "/src/mod1.rs")
-            .unwrap()
-            .write_all(checker.src1.content.as_bytes())
-            .map_err(|_| anyhow!("Failed to write mod1 file"))?;
-        std::fs::File::create(harness_path.to_owned() + "/src/mod2.rs")
-            .unwrap()
-            .write_all(checker.src2.content.as_bytes())
-            .map_err(|_| anyhow!("Failed to write mod2 file"))?;
-        std::fs::File::create(harness_path.to_owned() + "/src/main.rs")
-            .unwrap()
-            .write_all(harness.to_string().as_bytes())
-            .map_err(|_| anyhow!("Failed to write harness file"))?;
-
-        // Write Cargo.toml
-        std::fs::File::create(harness_path.to_owned() + "/Cargo.toml")
-            .unwrap()
-            .write_all(
-                r#"
+        let toml = r#"
 [package]
 name = "harness"
 version = "0.1.0"
@@ -198,18 +177,14 @@ edition = "2024"
 
 [dev-dependencies]
 kani = "*"
-"#
-                .as_bytes(),
-            )
-            .map_err(|_| anyhow!("Failed to write Cargo.toml"))?;
-
-        // Cargo fmt
-        let cur_dir = std::env::current_dir().unwrap();
-        let _ = std::env::set_current_dir(harness_path);
-        run_command_and_log_error("cargo", &["fmt"])?;
-        let _ = std::env::set_current_dir(cur_dir);
-
-        Ok(())
+"#;
+        create_harness_project(
+            harness_path,
+            &checker.src1.content,
+            &checker.src2.content,
+            &harness.to_string(),
+            toml,
+        )
     }
 
     /// Run Kani and save the output.
@@ -219,9 +194,16 @@ kani = "*"
 
         let cur_dir = std::env::current_dir().unwrap();
         let _ = std::env::set_current_dir(harness_path);
+        let timeout_secs = self.config.timeout_secs;
         let output = run_command_and_log_error(
             "cargo",
-            &["kani", "-Z", "unstable-options", "--harness-timeout", "10s"],
+            &[
+                "kani",
+                "-Z",
+                "unstable-options",
+                "--harness-timeout",
+                &format!("{}s", timeout_secs),
+            ],
         )?;
         let _ = std::env::set_current_dir(cur_dir);
 
@@ -259,10 +241,15 @@ kani = "*"
     }
 
     /// Remove the harness project.
-    fn remove_harness_project(&self, harness_path: &str) -> anyhow::Result<()> {
-        std::fs::remove_dir_all(harness_path)
-            .map_err(|_| anyhow!("Failed to remove harness file"))?;
-        Ok(())
+    fn remove_harness_project(&self) -> anyhow::Result<()> {
+        std::fs::remove_dir_all(&self.config.harness_path)
+            .map_err(|_| anyhow!("Failed to remove harness project"))
+    }
+
+    /// Remove the output file.
+    fn remove_output_file(&self) -> anyhow::Result<()> {
+        std::fs::remove_file(&self.config.output_path)
+            .map_err(|_| anyhow!("Failed to remove output file"))
     }
 }
 
@@ -280,23 +267,28 @@ impl Component for Kani {
     }
 
     fn run(&self, checker: &Checker) -> CheckResult {
-        let harness_path = "kani_harness";
         let harness = self.generate_harness(checker);
 
-        let res = self.create_harness_project(checker, harness, harness_path);
+        let res = self.create_harness_project(checker, harness, &self.config.harness_path);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
 
-        let output_path = "kani.tmp";
-        let res = self.run_kani(harness_path, output_path);
+        let res = self.run_kani(&self.config.harness_path, &self.config.output_path);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
-        let check_res = self.analyze_kani_output(output_path);
+        let check_res = self.analyze_kani_output(&self.config.output_path);
 
-        if let Err(e) = self.remove_harness_project(harness_path) {
-            return CheckResult::failed(e);
+        if !self.config.keep_harness {
+            if let Err(e) = self.remove_harness_project() {
+                return CheckResult::failed(e);
+            }
+        }
+        if !self.config.keep_output {
+            if let Err(e) = self.remove_output_file() {
+                return CheckResult::failed(e);
+            }
         }
 
         check_res

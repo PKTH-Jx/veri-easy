@@ -348,7 +348,5 @@ impl Checker {
 
         updated_common_funcs.retain(|f| !f.metadata.is_constructor() && !f.metadata.is_getter());
         self.unchecked_funcs = updated_common_funcs;
-
-        println!("{:?}", self.preconditions);
     }
 }

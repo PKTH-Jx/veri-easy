@@ -1,8 +1,9 @@
 //! Utility functions and helpers.
 
 use crate::log;
+use anyhow::anyhow;
 use std::{
-    io::BufRead,
+    io::{BufRead, Write},
     process::{Command, Output},
 };
 
@@ -29,4 +30,50 @@ pub fn run_command_and_log_error(program: &str, args: &[&str]) -> anyhow::Result
     }
 
     Ok(output)
+}
+
+/// Create a typical harness project directory structure. Dir structure:
+///
+/// harness_path
+/// ├── Cargo.toml
+/// └── src
+///     ├── main.rs
+///     ├── mod1.rs
+///     └── mod2.rs
+pub fn create_harness_project(
+    path: &str,
+    src1: &str,
+    src2: &str,
+    harness: &str,
+    toml: &str,
+) -> anyhow::Result<()> {
+    run_command_and_log_error("cargo", &["new", "--bin", "--vcs", "none", path])?;
+
+    // Write rust files
+    std::fs::File::create(path.to_owned() + "/src/mod1.rs")
+        .unwrap()
+        .write_all(src1.as_bytes())
+        .map_err(|_| anyhow!("Failed to write mod1 file"))?;
+    std::fs::File::create(path.to_owned() + "/src/mod2.rs")
+        .unwrap()
+        .write_all(src2.as_bytes())
+        .map_err(|_| anyhow!("Failed to write mod2 file"))?;
+    std::fs::File::create(path.to_owned() + "/src/main.rs")
+        .unwrap()
+        .write_all(harness.as_bytes())
+        .map_err(|_| anyhow!("Failed to write harness file"))?;
+
+    // Write Cargo.toml
+    std::fs::File::create(path.to_owned() + "/Cargo.toml")
+        .unwrap()
+        .write_all(toml.as_bytes())
+        .map_err(|_| anyhow!("Failed to write Cargo.toml"))?;
+
+    // Cargo fmt
+    let cur_dir = std::env::current_dir().unwrap();
+    let _ = std::env::set_current_dir(path);
+    run_command_and_log_error("cargo", &["fmt"])?;
+    let _ = std::env::set_current_dir(cur_dir);
+
+    Ok(())
 }

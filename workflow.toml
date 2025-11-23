@@ -1,0 +1,28 @@
+components = ["Identical", "Kani", "PBT", "DiffFuzz", "Alive2"]
+
+[kani]
+harness_path = "kani_harness"
+output_path = "kani.tmp"
+timeout_secs = 300
+keep_harness = false
+keep_output = false
+
+[alive2]
+alive2_path = "alive2-tv"
+output_path = "alive2.tmp"
+keep_output = false
+
+[diff_fuzz]
+harness_path = "df_harness"
+fuzzer_path = "df_fuzzer"
+output_path = "df.tmp"
+iterations = 1000
+keep_harness = false
+keep_output = false
+
+[pbt]
+harness_path = "pbt_harness"
+output_path = "pbt.tmp"
+test_cases = 10000
+keep_harness = false
+keep_output = false

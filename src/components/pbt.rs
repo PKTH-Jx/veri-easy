@@ -4,13 +4,14 @@ use anyhow::anyhow;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use regex::Regex;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 
 use crate::{
     check::{CheckResult, Checker, Component},
+    config::PBTConfig,
     defs::{CommonFunction, Path, Precondition},
     generate::{HarnessBackend, HarnessGenerator},
-    utils::run_command_and_log_error,
+    utils::{create_harness_project, run_command_and_log_error},
 };
 
 /// PBT harness generator backend.
@@ -172,9 +173,16 @@ impl HarnessBackend for PBTHarnessBackend {
 type PBTHarnessGenerator = HarnessGenerator<PBTHarnessBackend>;
 
 /// Property-based testing step using Proptest.
-pub struct PropertyBasedTesting;
+pub struct PropertyBasedTesting {
+    config: PBTConfig,
+}
 
 impl PropertyBasedTesting {
+    /// Create a new Property-Based Testing component with the given configuration.
+    pub fn new(config: PBTConfig) -> Self {
+        Self { config }
+    }
+
     fn generate_harness_file(&self, checker: &Checker) -> (Vec<Path>, TokenStream) {
         let generator = PBTHarnessGenerator::new(checker);
         // Collect functions and methods that are checked in harness
@@ -196,42 +204,13 @@ impl PropertyBasedTesting {
     }
 
     /// Create a cargo project for proptest harness.
-    ///
-    /// Dir structure:
-    ///
-    /// harness_path
-    /// ├── Cargo.toml
-    /// └── src
-    ///     ├── main.rs
-    ///     ├── mod1.rs
-    ///     └── mod2.rs
     fn create_harness_project(
         &self,
         checker: &Checker,
         harness: TokenStream,
         harness_path: &str,
     ) -> anyhow::Result<()> {
-        run_command_and_log_error("cargo", &["new", "--bin", "--vcs", "none", harness_path])?;
-
-        // Write rust files
-        std::fs::File::create(harness_path.to_owned() + "/src/mod1.rs")
-            .unwrap()
-            .write_all(checker.src1.content.as_bytes())
-            .map_err(|_| anyhow!("Failed to write mod1 file"))?;
-        std::fs::File::create(harness_path.to_owned() + "/src/mod2.rs")
-            .unwrap()
-            .write_all(checker.src2.content.as_bytes())
-            .map_err(|_| anyhow!("Failed to write mod2 file"))?;
-        std::fs::File::create(harness_path.to_owned() + "/src/main.rs")
-            .unwrap()
-            .write_all(harness.to_string().as_bytes())
-            .map_err(|_| anyhow!("Failed to write harness file"))?;
-
-        // Write Cargo.toml
-        std::fs::File::create(harness_path.to_owned() + "/Cargo.toml")
-            .unwrap()
-            .write_all(
-                r#"
+        let toml = r#"
 [package]
 name = "harness"
 version = "0.1.0"
@@ -240,18 +219,14 @@ edition = "2024"
 [dependencies]
 proptest = "1.9"
 proptest-derive = "0.2.0"
-"#
-                .as_bytes(),
-            )
-            .map_err(|_| anyhow!("Failed to write Cargo.toml"))?;
-
-        // Cargo fmt
-        let cur_dir = std::env::current_dir().unwrap();
-        let _ = std::env::set_current_dir(harness_path);
-        run_command_and_log_error("cargo", &["fmt"])?;
-        let _ = std::env::set_current_dir(cur_dir);
-
-        Ok(())
+"#;
+        create_harness_project(
+            harness_path,
+            &checker.src1.content,
+            &checker.src2.content,
+            &harness.to_string(),
+            toml,
+        )
     }
 
     /// Run libAFL fuzzer and save the ouput in "df.tmp".
@@ -294,10 +269,15 @@ proptest-derive = "0.2.0"
     }
 
     /// Remove the harness project.
-    fn remove_harness_project(&self, harness_path: &str) -> anyhow::Result<()> {
-        std::fs::remove_dir_all(harness_path)
-            .map_err(|_| anyhow!("Failed to remove harness file"))?;
-        Ok(())
+    fn remove_harness_project(&self) -> anyhow::Result<()> {
+        std::fs::remove_dir_all(&self.config.harness_path)
+            .map_err(|_| anyhow!("Failed to remove harness file"))
+    }
+
+    /// Remove the output file.
+    fn remove_output_file(&self) -> anyhow::Result<()> {
+        std::fs::remove_file(&self.config.output_path)
+            .map_err(|_| anyhow!("Failed to remove output file"))
     }
 }
 
@@ -315,23 +295,29 @@ impl Component for PropertyBasedTesting {
     }
 
     fn run(&self, checker: &Checker) -> CheckResult {
-        let harness_path = "pbt_harness";
         let (functions, harness) = self.generate_harness_file(checker);
 
-        let res = self.create_harness_project(checker, harness, harness_path);
+        let res = self.create_harness_project(checker, harness, &self.config.harness_path);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
 
-        let output_path = "pbt.tmp";
-        let res = self.run_test(harness_path, output_path);
+        let output_path = &self.config.output_path;
+        let res = self.run_test(&self.config.harness_path, output_path);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
         let check_res = self.analyze_pbt_output(&functions, output_path);
 
-        if let Err(e) = self.remove_harness_project(harness_path) {
-            return CheckResult::failed(e);
+        if !self.config.keep_harness {
+            if let Err(e) = self.remove_harness_project() {
+                return CheckResult::failed(e);
+            }
+        }
+        if !self.config.keep_output {
+            if let Err(e) = self.remove_output_file() {
+                return CheckResult::failed(e);
+            }
         }
 
         check_res
