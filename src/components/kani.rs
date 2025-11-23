@@ -260,8 +260,8 @@ kani = "*"
 
     /// Remove the harness project.
     fn remove_harness_project(&self, harness_path: &str) -> anyhow::Result<()> {
-        // std::fs::remove_dir_all(harness_path)
-        //     .map_err(|_| anyhow!("Failed to remove harness file"))?;
+        std::fs::remove_dir_all(harness_path)
+            .map_err(|_| anyhow!("Failed to remove harness file"))?;
         Ok(())
     }
 }

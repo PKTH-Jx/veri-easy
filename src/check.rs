@@ -46,6 +46,11 @@ impl Source {
             inst_types,
         })
     }
+
+    /// Append additional content to the source.
+    pub fn append_content(&mut self, additional: &str) {
+        self.content.push_str(additional);
+    }
 }
 
 /// Typed check result
