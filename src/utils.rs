@@ -38,7 +38,7 @@ pub fn run_command_and_log_error(program: &str, args: &[&str]) -> anyhow::Result
         );
     } else {
         log!(
-            Brief,
+            Verbose,
             Warning,
             "Command '{}' failed with exit code: {}",
             program,
@@ -47,7 +47,6 @@ pub fn run_command_and_log_error(program: &str, args: &[&str]) -> anyhow::Result
     }
     Ok(output)
 }
-
 
 /// Create a typical harness project directory structure. Dir structure:
 ///
@@ -72,11 +71,7 @@ pub fn create_harness_project(
     }
     let project_type = if lib { "--lib" } else { "--bin" };
     run_command_and_log_error("cargo", &["new", project_type, "--vcs", "none", path])?;
-    let harness_file = path.to_owned() + if lib {
-        "/src/lib.rs"
-    } else {
-        "/src/main.rs"
-    };
+    let harness_file = path.to_owned() + if lib { "/src/lib.rs" } else { "/src/main.rs" };
 
     // Write rust files
     std::fs::File::create(path.to_owned() + "/src/mod1.rs")

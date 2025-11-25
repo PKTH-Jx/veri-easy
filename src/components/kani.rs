@@ -241,7 +241,7 @@ kani = "*"
             if line.contains("VERIFICATION:- SUCCESSFUL") && func_name.is_some() {
                 res.ok.push(Path::from_str(&func_name.take().unwrap()));
             } else if line.contains("VERIFICATION:- FAILED") && func_name.is_some() {
-                func_name = None;
+                res.fail.push(Path::from_str(&func_name.take().unwrap()));
             }
         }
 

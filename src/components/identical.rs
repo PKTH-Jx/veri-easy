@@ -24,7 +24,7 @@ impl Component for Identical {
         };
 
         // only consider functions present in both srcs (unchecked sets already contain intersection)
-        for func in &checker.unchecked_funcs {
+        for func in &checker.under_checking_funcs {
             if func.body1 == func.body2 {
                 res.ok.push(func.metadata.name.clone());
             }

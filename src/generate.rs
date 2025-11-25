@@ -154,7 +154,7 @@ impl<B: HarnessBackend> HarnessGenerator<B> {
     /// Create a new harness generator for the given functions.
     pub fn new(checker: &Checker, backend: B) -> Self {
         let mut collection = FunctionCollection::new(
-            checker.unchecked_funcs.clone(),
+            checker.under_checking_funcs.clone(),
             checker.constructors.clone(),
             checker.getters.clone(),
             checker.preconditions.clone(),

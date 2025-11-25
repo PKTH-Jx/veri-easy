@@ -4,7 +4,10 @@ use anyhow::anyhow;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use regex::Regex;
-use std::{io::{BufRead, BufReader}, str::FromStr};
+use std::{
+    io::{BufRead, BufReader},
+    str::FromStr,
+};
 
 use crate::{
     check::{CheckResult, Checker, Component},

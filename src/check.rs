@@ -102,8 +102,8 @@ pub struct Checker {
     /// Second source file.
     pub src2: Source,
 
-    /// Functions that has not been verified yet.
-    pub unchecked_funcs: Vec<CommonFunction>,
+    /// Functions under checking.
+    pub under_checking_funcs: Vec<CommonFunction>,
     /// Functions that has been verified by formal components.
     pub verified_funcs: Vec<CommonFunction>,
     /// Functions that has been checked by testing components.
@@ -134,7 +134,7 @@ impl Checker {
             src2,
             components: steps,
             verified_funcs: Vec::new(),
-            unchecked_funcs: Vec::new(),
+            under_checking_funcs: Vec::new(),
             tested_funcs: Vec::new(),
             failed_funcs: Vec::new(),
             constructors: Vec::new(),
@@ -149,21 +149,16 @@ impl Checker {
     /// Run all steps in order
     pub fn run_all(&mut self) {
         for component in &self.components {
-            if self.unchecked_funcs.is_empty() {
-                log!(Brief, Critical, "All functions have been checked, stopping further checks.");
+            if self.under_checking_funcs.is_empty() {
+                log!(
+                    Brief,
+                    Critical,
+                    "All functions have been checked, stopping further checks."
+                );
                 break;
             }
 
-            match component.note() {
-                Some(note) => log!(
-                    Brief,
-                    Critical,
-                    "Running component `{}`: {}",
-                    component.name(),
-                    note
-                ),
-                None => log!(Brief, Critical, "Running component `{}`", component.name()),
-            }
+            Self::log_component(component.as_ref());
 
             let res = component.run(&self);
             if let Err(e) = res.status {
@@ -186,34 +181,53 @@ impl Checker {
             for name in &res.ok {
                 log!(Brief, Ok, "`{:?}` passed", name);
                 if let Some(func) = self
-                    .unchecked_funcs
+                    .under_checking_funcs
                     .iter()
                     .find(|func2| func2.metadata.name == *name)
                 {
                     if component.is_formal() {
+                        // Formal component provides enough evidence to verify the function
                         self.verified_funcs.push(func.clone());
+                        // So we move it to verified_funcs, and need not check it further
+                        self.under_checking_funcs
+                            .retain(|func2| func2.metadata.name != *name);
                     } else {
-                        self.tested_funcs.push(func.clone());
+                        // Testing component can only show the function is likely consistent
+                        // So we add it to tested_funcs but keep it in under_checking_funcs for further checking
+                        if !self
+                            .tested_funcs
+                            .iter()
+                            .any(|f| f.metadata.name == func.metadata.name)
+                        {
+                            self.tested_funcs.push(func.clone());
+                        }
                     }
-                    self.unchecked_funcs
-                        .retain(|func2| func2.metadata.name != *name);
                 }
             }
 
             for name in &res.fail {
-                log!(Brief, Error, "`{:?}` failed", name);
+                if component.is_formal() {
+                    log!(Brief, Unsure, "`{:?}` undetermined", name);
+                } else {
+                    log!(Brief, Error, "`{:?}` failed", name);
+                }
                 if let Some(func) = self
-                    .unchecked_funcs
+                    .under_checking_funcs
                     .iter()
                     .find(|func2| func2.metadata.name == *name)
                 {
-                    self.failed_funcs.push(func.clone());
-                    self.unchecked_funcs
-                        .retain(|func2| func2.metadata.name != *name);
+                    if !component.is_formal() {
+                        // Testing component provides evidence to show the function is inconsistent
+                        self.failed_funcs.push(func.clone());
+                        // So we move it to failed_funcs, and need not check it further
+                        self.under_checking_funcs
+                            .retain(|func2| func2.metadata.name != *name);
+                    }
                 }
             }
-            
-            if !res.fail.is_empty() && self.strict {
+
+            if !component.is_formal() && !res.fail.is_empty() && self.strict {
+                // Strict mode: stop on first error from testing component
                 log!(
                     Brief,
                     Warning,
@@ -232,25 +246,53 @@ impl Checker {
             log!(Brief, Simple, "");
         }
 
-        if !self.unchecked_funcs.is_empty() {
-            let names: Vec<&Path> = self
-                .unchecked_funcs
-                .iter()
-                .map(|f| &f.metadata.name)
-                .collect();
-            log!(Brief, Error, "Unchecked functions remain: {:?}", names);
-        } 
+        // If both under-checking and failed functions are empty, all functions have been checked
+        if self.under_checking_funcs.is_empty() && self.failed_funcs.is_empty() {
+            log!(Brief, Ok, "All functions have been checked.");
+        }
+        // If any functions failed, log them
         if !self.failed_funcs.is_empty() {
-            let names: Vec<&Path> = self
-                .failed_funcs
-                .iter()
-                .map(|f| &f.metadata.name)
-                .collect();
+            let names: Vec<&Path> = self.failed_funcs.iter().map(|f| &f.metadata.name).collect();
             log!(Brief, Error, "Some functions failed checks: {:?}", names);
         }
 
-        if self.unchecked_funcs.is_empty() && self.failed_funcs.is_empty() {
-            log!(Brief, Ok, "All functions have been checked.");
+        let fail_formal_pass_test: Vec<&Path> = self
+            .failed_funcs
+            .iter()
+            .filter(|f| {
+                self.tested_funcs
+                    .iter()
+                    .any(|tf| tf.metadata.name == f.metadata.name)
+            })
+            .map(|f| &f.metadata.name)
+            .collect();
+        if !fail_formal_pass_test.is_empty() {
+            log!(
+                Brief,
+                Warning,
+                "Some functions failed formal checks but passed testing checks: {:?}",
+                fail_formal_pass_test
+            );
+        }
+
+        let unchecked_and_untested: Vec<&Path> = self
+            .under_checking_funcs
+            .iter()
+            .filter(|f| {
+                !self
+                    .tested_funcs
+                    .iter()
+                    .any(|tf| tf.metadata.name == f.metadata.name)
+            })
+            .map(|f| &f.metadata.name)
+            .collect();
+        if !unchecked_and_untested.is_empty() {
+            log!(
+                Brief,
+                Error,
+                "Some functions remain unverified after all checks: {:?}",
+                unchecked_and_untested
+            );
         }
     }
 
@@ -258,8 +300,13 @@ impl Checker {
     pub fn print_state(&self) {
         log!(Normal, Info, "  Verified: {:?}", self.verified_funcs);
         log!(Normal, Info, "  Tested: {:?}", self.tested_funcs);
-        log!(Normal, Info, "  Unchecked: {:?}", self.unchecked_funcs);
         log!(Normal, Info, "  Failed: {:?}", self.failed_funcs);
+        log!(
+            Normal,
+            Info,
+            "  Under checking: {:?}",
+            self.under_checking_funcs
+        );
         log!(
             Verbose,
             Info,
@@ -381,6 +428,25 @@ impl Checker {
             .collect();
 
         updated_common_funcs.retain(|f| !f.metadata.is_constructor() && !f.metadata.is_getter());
-        self.unchecked_funcs = updated_common_funcs;
+        self.under_checking_funcs = updated_common_funcs;
+    }
+
+    /// Log information about the component being run.
+    fn log_component(component: &dyn Component) {
+        match component.note() {
+            Some(note) => log!(
+                Brief,
+                Critical,
+                "Running {} component `{}`: {}",
+                if component.is_formal() {
+                    "formal"
+                } else {
+                    "testing"
+                },
+                component.name(),
+                note
+            ),
+            None => log!(Brief, Critical, "Running component `{}`", component.name()),
+        }
     }
 }
