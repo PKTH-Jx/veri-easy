@@ -37,6 +37,8 @@ pub struct KaniConfig {
     pub output_path: String,
     /// Timeout in seconds for Kani execution.
     pub timeout_secs: u64,
+    /// Whether to generate new harness.
+    pub gen_harness: bool,
     /// Keep intermediate harness project.
     pub keep_harness: bool,
     /// Keep Kani output file.
@@ -49,6 +51,7 @@ impl Default for KaniConfig {
             harness_path: "kani_harness".to_string(),
             output_path: "kani.tmp".to_string(),
             timeout_secs: 300,
+            gen_harness: true,
             keep_harness: false,
             keep_output: false,
         }

@@ -3,7 +3,8 @@ components = ["Identical", "Kani", "PBT", "DiffFuzz"]
 [kani]
 harness_path = "kani_harness"
 output_path = "kani.tmp"
-timeout_secs = 3
+timeout_secs = 400
+gen_harness = true
 keep_harness = true
 keep_output = true
 

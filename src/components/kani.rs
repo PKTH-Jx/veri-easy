@@ -101,6 +101,7 @@ impl HarnessBackend for KaniHarnessBackend {
             #[cfg(kani)]
             #[kani::proof]
             #[allow(non_snake_case)]
+            #[kani::unwind(20)]
             pub fn #test_fn_name() {
                 let constr_arg_struct = kani::any::<#constructor_arg_struct>();
                 // Construct s1 and s2
@@ -275,11 +276,12 @@ impl Component for Kani {
     }
 
     fn run(&self, checker: &Checker) -> CheckResult {
-        let harness = self.generate_harness(checker);
-
-        let res = self.create_harness_project(checker, harness, &self.config.harness_path);
-        if let Err(e) = res {
-            return CheckResult::failed(e);
+        if self.config.gen_harness {
+            let harness = self.generate_harness(checker);
+            let res = self.create_harness_project(checker, harness, &self.config.harness_path);
+            if let Err(e) = res {
+                return CheckResult::failed(e);
+            }
         }
 
         let res = self.run_kani(&self.config.harness_path, &self.config.output_path);
