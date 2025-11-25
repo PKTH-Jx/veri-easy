@@ -276,6 +276,7 @@ postcard = "*"
             &checker.src2.content,
             &harness.to_string(),
             toml,
+            true,
         )
     }
 
@@ -288,6 +289,10 @@ postcard = "*"
         let _ = std::env::set_current_dir(fuzzer_path);
         let output = run_command_and_log_error("cargo", &["run", "--release"])?;
         let _ = std::env::set_current_dir(cur_dir);
+
+        if output.status.code() == Some(101) {
+            return Err(anyhow!("Command failed due to compilation error"));
+        }
 
         std::io::copy(&mut output.stdout.as_slice(), &mut &output_file)
             .map_err(|_| anyhow!("Failed to write fuzzer output"))?;
@@ -311,6 +316,7 @@ postcard = "*"
                 let func_name = caps[1].to_string();
                 if let Some(i) = res.ok.iter().position(|f| f.to_string() == func_name) {
                     res.ok.swap_remove(i);
+                    res.fail.push(Path::from_str(&func_name));
                 }
             }
         }

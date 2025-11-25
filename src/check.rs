@@ -113,6 +113,8 @@ pub struct Checker {
     pub getters: Vec<CommonFunction>,
     /// Preconditions (used to filter out tests that do not satisfy preconditions).
     pub preconditions: Vec<Precondition>,
+    /// Strict mode: exit on first error.
+    pub strict: bool,
 }
 
 impl Checker {
@@ -121,6 +123,7 @@ impl Checker {
         src2: Source,
         steps: Vec<Box<dyn Component>>,
         preconditions: Vec<Precondition>,
+        strict: bool,
     ) -> Self {
         let mut checker = Self {
             src1,
@@ -132,6 +135,7 @@ impl Checker {
             constructors: Vec::new(),
             getters: Vec::new(),
             preconditions,
+            strict,
         };
         checker.preprocess();
         checker
@@ -186,19 +190,19 @@ impl Checker {
                 }
             }
 
-            if !res.fail.is_empty() {
-                for name in &res.fail {
-                    log!(Brief, Error, "`{:?}` failed", name);
-                }
+            for name in &res.fail {
+                log!(Brief, Error, "`{:?}` failed", name);
+            }
+            
+            if !res.fail.is_empty() && self.strict {
                 log!(
                     Brief,
-                    Error,
-                    "Step `{}` found inconsistencies.",
-                    component.name()
+                    Warning,
+                    "Strict mode enabled, stopping further checks."
                 );
-                self.print_state();
                 break;
             }
+
             log!(
                 Normal,
                 Info,

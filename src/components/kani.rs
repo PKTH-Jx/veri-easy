@@ -187,6 +187,7 @@ kani = "*"
             &checker.src2.content,
             &harness.to_string(),
             toml,
+            false,
         )
     }
 
@@ -209,6 +210,10 @@ kani = "*"
             ],
         )?;
         let _ = std::env::set_current_dir(cur_dir);
+
+        if output.status.code() == Some(101) {
+            return Err(anyhow!("Command failed due to compilation error"));
+        }
 
         std::io::copy(&mut output.stdout.as_slice(), &mut &output_file)
             .map_err(|_| anyhow!("Failed to write Kani output"))?;

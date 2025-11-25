@@ -104,7 +104,7 @@ fn main() {
     );
 
     // Create checker and run workflow
-    let mut checker = Checker::new(s1, s2, components, preconditions);
+    let mut checker = Checker::new(s1, s2, components, preconditions, config.strict);
     log!(Normal, Info, "Logging initial state:");
     checker.print_state();
     log!(Normal, Simple, "");

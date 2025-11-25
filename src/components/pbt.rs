@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use regex::Regex;
-use std::io::{BufRead, BufReader};
+use std::{io::{BufRead, BufReader}, str::FromStr};
 
 use crate::{
     check::{CheckResult, Checker, Component},
@@ -154,7 +154,7 @@ impl HarnessBackend for PBTHarnessBackend {
         methods: Vec<TokenStream>,
         _additional: TokenStream,
     ) -> TokenStream {
-        let cases = self.cases;
+        let cases = TokenStream::from_str(&self.cases.to_string()).unwrap();
         quote! {
             #![allow(unused)]
             #![allow(non_snake_case)]
@@ -237,6 +237,7 @@ proptest-derive = "0.2.0"
             &checker.src2.content,
             &harness.to_string(),
             toml,
+            false,
         )
     }
 
@@ -272,6 +273,7 @@ proptest-derive = "0.2.0"
                 let func_name = caps[1].to_string();
                 if let Some(i) = res.ok.iter().position(|f| f.to_string() == func_name) {
                     res.ok.swap_remove(i);
+                    res.fail.push(Path::from_str(&func_name));
                 }
             }
         }

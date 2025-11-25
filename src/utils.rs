@@ -29,8 +29,25 @@ pub fn run_command_and_log_error(program: &str, args: &[&str]) -> anyhow::Result
         }
     }
 
+    if output.status.success() {
+        log!(
+            Verbose,
+            Info,
+            "Command '{}' finished successfully.",
+            program
+        );
+    } else {
+        log!(
+            Brief,
+            Warning,
+            "Command '{}' failed with exit code: {}",
+            program,
+            output.status
+        );
+    }
     Ok(output)
 }
+
 
 /// Create a typical harness project directory structure. Dir structure:
 ///
@@ -46,8 +63,20 @@ pub fn create_harness_project(
     src2: &str,
     harness: &str,
     toml: &str,
+    lib: bool,
 ) -> anyhow::Result<()> {
-    run_command_and_log_error("cargo", &["new", "--bin", "--vcs", "none", path])?;
+    // Remove existing directory if any
+    if std::path::Path::new(path).exists() {
+        std::fs::remove_dir_all(path)
+            .map_err(|_| anyhow!("Failed to remove existing harness directory"))?;
+    }
+    let project_type = if lib { "--lib" } else { "--bin" };
+    run_command_and_log_error("cargo", &["new", project_type, "--vcs", "none", path])?;
+    let harness_file = path.to_owned() + if lib {
+        "/src/lib.rs"
+    } else {
+        "/src/main.rs"
+    };
 
     // Write rust files
     std::fs::File::create(path.to_owned() + "/src/mod1.rs")
@@ -58,7 +87,7 @@ pub fn create_harness_project(
         .unwrap()
         .write_all(src2.as_bytes())
         .map_err(|_| anyhow!("Failed to write mod2 file"))?;
-    std::fs::File::create(path.to_owned() + "/src/main.rs")
+    std::fs::File::create(harness_file)
         .unwrap()
         .write_all(harness.as_bytes())
         .map_err(|_| anyhow!("Failed to write harness file"))?;

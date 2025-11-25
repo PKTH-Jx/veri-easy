@@ -7,8 +7,6 @@ use std::sync::OnceLock;
 /// Logging level.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum LogLevel {
-    /// No logging.
-    Off,
     /// Brief logging, including components and check results.
     Brief,
     /// Normal logging, including all brief logs and checker states.
@@ -20,7 +18,6 @@ pub enum LogLevel {
 impl From<&str> for LogLevel {
     fn from(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "off" => LogLevel::Off,
             "brief" => LogLevel::Brief,
             "normal" => LogLevel::Normal,
             "verbose" => LogLevel::Verbose,

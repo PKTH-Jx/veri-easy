@@ -18,6 +18,9 @@ pub struct VerieasyConfig {
     /// File from which to collect preconditions.
     #[clap(short = 'p', long)]
     pub preconditions: Option<String>,
+    /// Strict mode: exit on first error.
+    #[clap(short = 's', long, default_value_t = false)]
+    pub strict: bool,
     /// Source file 1, usually the original source.
     pub file1: String,
     /// Source file 2, usually the Verus refactored source.
