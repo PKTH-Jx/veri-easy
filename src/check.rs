@@ -101,12 +101,16 @@ pub struct Checker {
     pub src1: Source,
     /// Second source file.
     pub src2: Source,
+
     /// Functions that has not been verified yet.
     pub unchecked_funcs: Vec<CommonFunction>,
     /// Functions that has been verified by formal components.
     pub verified_funcs: Vec<CommonFunction>,
     /// Functions that has been checked by testing components.
     pub tested_funcs: Vec<CommonFunction>,
+    /// Functions that failed to be checked.
+    pub failed_funcs: Vec<CommonFunction>,
+
     /// Constructors (not checked directly).
     pub constructors: Vec<CommonFunction>,
     /// Getters (not checked directly).
@@ -132,6 +136,7 @@ impl Checker {
             verified_funcs: Vec::new(),
             unchecked_funcs: Vec::new(),
             tested_funcs: Vec::new(),
+            failed_funcs: Vec::new(),
             constructors: Vec::new(),
             getters: Vec::new(),
             preconditions,
@@ -144,6 +149,11 @@ impl Checker {
     /// Run all steps in order
     pub fn run_all(&mut self) {
         for component in &self.components {
+            if self.unchecked_funcs.is_empty() {
+                log!(Brief, Critical, "All functions have been checked, stopping further checks.");
+                break;
+            }
+
             match component.note() {
                 Some(note) => log!(
                     Brief,
@@ -192,6 +202,15 @@ impl Checker {
 
             for name in &res.fail {
                 log!(Brief, Error, "`{:?}` failed", name);
+                if let Some(func) = self
+                    .unchecked_funcs
+                    .iter()
+                    .find(|func2| func2.metadata.name == *name)
+                {
+                    self.failed_funcs.push(func.clone());
+                    self.unchecked_funcs
+                        .retain(|func2| func2.metadata.name != *name);
+                }
             }
             
             if !res.fail.is_empty() && self.strict {
@@ -220,7 +239,17 @@ impl Checker {
                 .map(|f| &f.metadata.name)
                 .collect();
             log!(Brief, Error, "Unchecked functions remain: {:?}", names);
-        } else {
+        } 
+        if !self.failed_funcs.is_empty() {
+            let names: Vec<&Path> = self
+                .failed_funcs
+                .iter()
+                .map(|f| &f.metadata.name)
+                .collect();
+            log!(Brief, Error, "Some functions failed checks: {:?}", names);
+        }
+
+        if self.unchecked_funcs.is_empty() && self.failed_funcs.is_empty() {
             log!(Brief, Ok, "All functions have been checked.");
         }
     }
@@ -230,6 +259,7 @@ impl Checker {
         log!(Normal, Info, "  Verified: {:?}", self.verified_funcs);
         log!(Normal, Info, "  Tested: {:?}", self.tested_funcs);
         log!(Normal, Info, "  Unchecked: {:?}", self.unchecked_funcs);
+        log!(Normal, Info, "  Failed: {:?}", self.failed_funcs);
         log!(
             Verbose,
             Info,
