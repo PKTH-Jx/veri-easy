@@ -14,7 +14,7 @@ use crate::{
     config::PBTConfig,
     defs::{CommonFunction, Path, Precondition},
     generate::{HarnessBackend, HarnessGenerator},
-    utils::{create_harness_project, run_command_and_log_error},
+    utils::{create_harness_project, run_command},
 };
 
 /// PBT harness generator backend.
@@ -246,16 +246,7 @@ proptest-derive = "0.2.0"
 
     /// Run libAFL fuzzer and save the ouput in "df.tmp".
     fn run_test(&self, harness_path: &str, output_path: &str) -> anyhow::Result<()> {
-        let output_file =
-            std::fs::File::create(output_path).map_err(|_| anyhow!("Failed to create tmp file"))?;
-
-        let cur_dir = std::env::current_dir().unwrap();
-        let _ = std::env::set_current_dir(harness_path);
-        let output = run_command_and_log_error("cargo", &["test"])?;
-        let _ = std::env::set_current_dir(cur_dir);
-
-        std::io::copy(&mut output.stdout.as_slice(), &mut &output_file)
-            .map_err(|_| anyhow!("Failed to write fuzzer output"))?;
+        run_command("cargo", &["test"], Some(output_path), Some(harness_path))?;
         Ok(())
     }
 

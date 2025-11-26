@@ -11,7 +11,7 @@ use crate::{
     config::KaniConfig,
     defs::{CommonFunction, Path, Precondition},
     generate::{HarnessBackend, HarnessGenerator},
-    utils::{create_harness_project, run_command_and_log_error},
+    utils::{create_harness_project, run_command},
 };
 
 /// Kani harness generator backend.
@@ -194,13 +194,8 @@ kani = "*"
 
     /// Run Kani and save the output.
     fn run_kani(&self, harness_path: &str, output_path: &str) -> anyhow::Result<()> {
-        let output_file = std::fs::File::create(output_path)
-            .map_err(|_| anyhow!("Failed to create output file"))?;
-
-        let cur_dir = std::env::current_dir().unwrap();
-        let _ = std::env::set_current_dir(harness_path);
         let timeout_secs = self.config.timeout_secs;
-        let output = run_command_and_log_error(
+        let status = run_command(
             "cargo",
             &[
                 "kani",
@@ -209,15 +204,13 @@ kani = "*"
                 "--harness-timeout",
                 &format!("{}s", timeout_secs),
             ],
+            Some(output_path),
+            Some(harness_path),
         )?;
-        let _ = std::env::set_current_dir(cur_dir);
 
-        if output.status.code() == Some(101) {
+        if status.code() == Some(101) {
             return Err(anyhow!("Command failed due to compilation error"));
         }
-
-        std::io::copy(&mut output.stdout.as_slice(), &mut &output_file)
-            .map_err(|_| anyhow!("Failed to write Kani output"))?;
         Ok(())
     }
 

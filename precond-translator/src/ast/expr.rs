@@ -7,7 +7,7 @@ use super::{
 
 /// A type that expresses "checkable" expressions derived from Verus spec AST.
 ///
-/// This Expr type is intentionally simple, expressive enough for boolean logic, field accesses, 
+/// This Expr type is intentionally simple, expressive enough for boolean logic, field accesses,
 /// indexing, type casts, and calls to spec functions/methods.
 #[derive(Debug, Clone)]
 pub enum Expr {

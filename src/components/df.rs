@@ -11,7 +11,7 @@ use crate::{
     config::DiffFuzzConfig,
     defs::{CommonFunction, Path, Precondition},
     generate::{FunctionCollection, HarnessBackend, HarnessGenerator},
-    utils::{create_harness_project, run_command_and_log_error},
+    utils::{create_harness_project, run_command},
 };
 
 /// Differential fuzzing harness generator backend.
@@ -282,20 +282,16 @@ postcard = "*"
 
     /// Run libAFL fuzzer and save the ouput in "df.tmp".
     fn run_fuzzer(&self, fuzzer_path: &str, output_path: &str) -> anyhow::Result<()> {
-        let output_file =
-            std::fs::File::create(output_path).map_err(|_| anyhow!("Failed to create tmp file"))?;
+        let status = run_command(
+            "cargo",
+            &["run", "--release"],
+            Some(output_path),
+            Some(fuzzer_path),
+        )?;
 
-        let cur_dir = std::env::current_dir().unwrap();
-        let _ = std::env::set_current_dir(fuzzer_path);
-        let output = run_command_and_log_error("cargo", &["run", "--release"])?;
-        let _ = std::env::set_current_dir(cur_dir);
-
-        if output.status.code() == Some(101) {
+        if status.code() == Some(101) {
             return Err(anyhow!("Command failed due to compilation error"));
         }
-
-        std::io::copy(&mut output.stdout.as_slice(), &mut &output_file)
-            .map_err(|_| anyhow!("Failed to write fuzzer output"))?;
         Ok(())
     }
 
