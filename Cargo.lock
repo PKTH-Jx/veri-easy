@@ -177,7 +177,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
- "toml",
  "verus_syn",
 ]
 
@@ -364,7 +363,8 @@ dependencies = [
 
 [[package]]
 name = "verus_syn"
-version = "0.0.0-2025-11-09-0048"
+version = "0.0.0-2025-11-16-0050"
+source = "git+https://github.com/verus-lang/verus.git#351d1b6ecde496b697ba098b288d19011c539067"
 dependencies = [
  "proc-macro2",
  "quote",
