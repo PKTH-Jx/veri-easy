@@ -19,7 +19,10 @@ use crate::{
 
 /// PBT harness generator backend.
 struct PBTHarnessBackend {
+    /// Number of test cases.
     cases: usize,
+    /// Use preconditions.
+    use_preconditions: bool,
 }
 
 impl HarnessBackend for PBTHarnessBackend {
@@ -34,7 +37,7 @@ impl HarnessBackend for PBTHarnessBackend {
         &self,
         function: &CommonFunction,
         function_args: &[TokenStream],
-        _precondition: Option<&Precondition>,
+        precondition: Option<&Precondition>,
     ) -> TokenStream {
         let fn_name = &function.metadata.name;
         let fn_name_string = fn_name.to_string();
@@ -44,9 +47,22 @@ impl HarnessBackend for PBTHarnessBackend {
         // Function argument struct name
         let function_arg_struct = format_ident!("Args{}", fn_name.to_ident());
 
+        // If a precondition is provided, add assume statements before function call
+        let precondition = self.use_preconditions.then(|| {
+            precondition.map(|pre| {
+                let check_fn_name = pre.check_name();
+                quote! {
+                    prop_assume!(#check_fn_name(#(function_arg_struct.#function_args),*));
+                }
+            })
+        });
+
         quote! {
             #[test]
             fn #test_fn_name(function_arg_struct in any::<#function_arg_struct>()) {
+                // Precondition assume
+                #precondition
+
                 // Function call
                 let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     mod1::#fn_name(#(function_arg_struct.#function_args),*)
@@ -75,7 +91,7 @@ impl HarnessBackend for PBTHarnessBackend {
         method_args: &[TokenStream],
         constructor_args: &[TokenStream],
         receiver_prefix: TokenStream,
-        _precondition: Option<&Precondition>,
+        precondition: Option<&Precondition>,
     ) -> TokenStream {
         let fn_name = &method.metadata.name;
         let constr_name = &constructor.metadata.name;
@@ -106,6 +122,16 @@ impl HarnessBackend for PBTHarnessBackend {
             }
         });
 
+        // If a precondition is provided, add assume statements before method call
+        let precondition = self.use_preconditions.then(|| {
+            precondition.map(|pre| {
+                let check_fn_name = pre.check_name();
+                quote! {
+                    prop_assume!(s2.#check_fn_name(#(method_arg_struct.#method_args),*));
+                }
+            })
+        });
+
         quote! {
             #[test]
             fn #test_fn_name(
@@ -125,6 +151,9 @@ impl HarnessBackend for PBTHarnessBackend {
                     Ok(s) => s,
                     Err(_) => return Ok(()),
                 };
+
+                // Precondition assume
+                #precondition
 
                 // Method call
                 let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -197,6 +226,7 @@ impl PropertyBasedTesting {
             checker,
             PBTHarnessBackend {
                 cases: self.config.test_cases,
+                use_preconditions: self.config.use_preconditions,
             },
         );
         // Collect functions and methods that are checked in harness

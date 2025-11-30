@@ -1,12 +1,14 @@
-components = ["Identical", "Kani", "PBT", "DiffFuzz"]
+components = ["kani"]
 
 [kani]
 harness_path = "kani_harness"
 output_path = "kani.tmp"
-timeout_secs = 400
+timeout_secs = 100
 gen_harness = true
 keep_harness = true
 keep_output = true
+use_preconditions = true
+loop_unwind = 20
 
 [alive2]
 alive2_path = "/Users/jingx/Dev/os/verif/cmpir/alive2/build/alive-tv"
@@ -18,12 +20,13 @@ harness_path = "/Users/jingx/Dev/os/verif/fuzz/harness"
 fuzzer_path = "/Users/jingx/Dev/os/verif/fuzz"
 output_path = "df.tmp"
 iterations = 1000
-keep_harness = false
-keep_output = false
+keep_harness = true
+keep_output = true
 
 [pbt]
 harness_path = "pbt_harness"
 output_path = "pbt.tmp"
 test_cases = 30000
-keep_harness = false
+keep_harness = true
 keep_output = false
+use_preconditions = true

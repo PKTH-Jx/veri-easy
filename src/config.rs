@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{check::Component, components::*, log, log::LogLevel};
 
-/// Veri-easy global configuration.
+/// Veri-easy Functional Equivalence Checker.
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
 pub struct VerieasyConfig {
@@ -43,6 +43,10 @@ pub struct KaniConfig {
     pub keep_harness: bool,
     /// Keep Kani output file.
     pub keep_output: bool,
+    /// Use preconditions.
+    pub use_preconditions: bool,
+    /// Loop unwind bound.
+    pub loop_unwind: Option<u32>,
 }
 
 impl Default for KaniConfig {
@@ -54,6 +58,8 @@ impl Default for KaniConfig {
             gen_harness: true,
             keep_harness: false,
             keep_output: false,
+            use_preconditions: true,
+            loop_unwind: None,
         }
     }
 }
@@ -125,6 +131,8 @@ pub struct PBTConfig {
     pub keep_harness: bool,
     /// Keep PBT output file.
     pub keep_output: bool,
+    /// Use preconditions.
+    pub use_preconditions: bool,
 }
 
 impl Default for PBTConfig {
@@ -135,6 +143,7 @@ impl Default for PBTConfig {
             test_cases: 10000,
             keep_harness: false,
             keep_output: false,
+            use_preconditions: true,
         }
     }
 }
@@ -169,27 +178,27 @@ impl WorkflowConfig {
             )
         };
         for component in &config.components {
-            match component.as_str() {
-                "Identical" => (),
-                "Kani" => {
+            match component.to_lowercase().as_str() {
+                "identical" => (),
+                "kani" => {
                     if config.kani.is_none() {
                         log!(Brief, Warning, &msg("Kani"));
                         config.kani = Some(KaniConfig::default());
                     }
                 }
-                "PBT" => {
+                "pbt" => {
                     if config.pbt.is_none() {
                         log!(Brief, Warning, &msg("PBT"));
                         config.pbt = Some(PBTConfig::default());
                     }
                 }
-                "DiffFuzz" => {
+                "difffuzz" => {
                     if config.diff_fuzz.is_none() {
                         log!(Brief, Warning, &msg("Differential Fuzzing"));
                         config.diff_fuzz = Some(DiffFuzzConfig::default());
                     }
                 }
-                "Alive2" => {
+                "alive2" => {
                     if config.alive2.is_none() {
                         log!(Brief, Warning, &msg("Alive2"));
                         config.alive2 = Some(Alive2Config::default());
@@ -239,16 +248,16 @@ impl WorkflowConfig {
     pub fn construct_workflow(&self) -> Vec<Box<dyn Component>> {
         let mut components: Vec<Box<dyn Component>> = Vec::new();
         for component in &self.components {
-            match component.as_str() {
-                "Identical" => components.push(Box::new(Identical)),
-                "Kani" => components.push(Box::new(Kani::new(self.kani.to_owned().unwrap()))),
-                "PBT" => components.push(Box::new(PropertyBasedTesting::new(
+            match component.to_lowercase().as_str() {
+                "identical" => components.push(Box::new(Identical)),
+                "kani" => components.push(Box::new(Kani::new(self.kani.to_owned().unwrap()))),
+                "pbt" => components.push(Box::new(PropertyBasedTesting::new(
                     self.pbt.to_owned().unwrap(),
                 ))),
-                "DiffFuzz" => components.push(Box::new(DifferentialFuzzing::new(
+                "difffuzz" => components.push(Box::new(DifferentialFuzzing::new(
                     self.diff_fuzz.to_owned().unwrap(),
                 ))),
-                "Alive2" => components.push(Box::new(Alive2::new(self.alive2.to_owned().unwrap()))),
+                "alive2" => components.push(Box::new(Alive2::new(self.alive2.to_owned().unwrap()))),
                 other => log!(
                     Brief,
                     Warning,

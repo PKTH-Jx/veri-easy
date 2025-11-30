@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use regex::Regex;
-use std::io::BufRead;
+use std::{io::BufRead, str::FromStr};
 
 use crate::{
     check::{CheckResult, Checker, Component},
@@ -15,7 +15,12 @@ use crate::{
 };
 
 /// Kani harness generator backend.
-struct KaniHarnessBackend;
+struct KaniHarnessBackend {
+    /// Use preconditions.
+    use_preconditions: bool,
+    /// Loop unwind limit.
+    loop_unwind: Option<u32>,
+}
 
 impl HarnessBackend for KaniHarnessBackend {
     fn arg_struct_attrs(&self) -> TokenStream {
@@ -38,10 +43,19 @@ impl HarnessBackend for KaniHarnessBackend {
         let function_arg_struct = format_ident!("Args{}", fn_name.to_ident());
 
         // If precondition is present, we may need to add assume code
-        let precondition = precondition.map(|pre| {
-            let check_fn_name = pre.check_name();
+        let precondition = self.use_preconditions.then(|| {
+            precondition.map(|pre| {
+                let check_fn_name = pre.check_name();
+                quote! {
+                    kani::assume(#check_fn_name(#(function_arg_struct.#function_args),*));
+                }
+            })
+        });
+        // If loop unwind is specified, add unwind attribute
+        let unwind_attr = self.loop_unwind.map(|unwind| {
+            let unwind = TokenStream::from_str(&unwind.to_string()).unwrap();
             quote! {
-                kani::assume(#check_fn_name(#(function_arg_struct.#function_args),*));
+                #[kani::unwind(#unwind)]
             }
         });
 
@@ -49,6 +63,7 @@ impl HarnessBackend for KaniHarnessBackend {
             #[cfg(kani)]
             #[kani::proof]
             #[allow(non_snake_case)]
+            #unwind_attr
             pub fn #test_fn_name() {
                 let function_arg_struct = kani::any::<#function_arg_struct>();
                 // Precondition assume
@@ -90,10 +105,19 @@ impl HarnessBackend for KaniHarnessBackend {
         });
 
         // If precondition is present, we may need to add assume code
-        let precondition = precondition.map(|pre| {
-            let check_fn_name = pre.check_name();
+        let precondition = self.use_preconditions.then(|| {
+            precondition.map(|pre| {
+                let check_fn_name = pre.check_name();
+                quote! {
+                    kani::assume(s2.#check_fn_name(#(method_arg_struct.#method_args),*));
+                }
+            })
+        });
+        // If loop unwind is specified, add unwind attribute
+        let unwind_attr = self.loop_unwind.map(|unwind| {
+            let unwind = TokenStream::from_str(&unwind.to_string()).unwrap();
             quote! {
-                kani::assume(s2.#check_fn_name(#(method_arg_struct.#method_args),*));
+                #[kani::unwind(#unwind)]
             }
         });
 
@@ -101,7 +125,7 @@ impl HarnessBackend for KaniHarnessBackend {
             #[cfg(kani)]
             #[kani::proof]
             #[allow(non_snake_case)]
-            #[kani::unwind(20)]
+            #unwind_attr
             pub fn #test_fn_name() {
                 let constr_arg_struct = kani::any::<#constructor_arg_struct>();
                 // Construct s1 and s2
@@ -162,7 +186,13 @@ impl Kani {
 
     /// Generate harness code for Kani.
     fn generate_harness(&self, checker: &Checker) -> TokenStream {
-        let generator = KaniHarnessGenerator::new(checker, KaniHarnessBackend);
+        let generator = KaniHarnessGenerator::new(
+            checker,
+            KaniHarnessBackend {
+                use_preconditions: self.config.use_preconditions,
+                loop_unwind: self.config.loop_unwind,
+            },
+        );
         generator.generate_harness()
     }
 
