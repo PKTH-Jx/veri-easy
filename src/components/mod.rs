@@ -1,4 +1,4 @@
-//! Test steps
+//! Formal and testing components.
 
 mod alive2;
 mod df;

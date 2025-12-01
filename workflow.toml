@@ -11,7 +11,7 @@ use_preconditions = true
 loop_unwind = 20
 
 [alive2]
-alive2_path = "/Users/jingx/Dev/os/verif/cmpir/alive2/build/alive-tv"
+alive2_path = ""
 output_path = "alive2.tmp"
 keep_output = false
 
