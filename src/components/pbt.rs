@@ -48,14 +48,29 @@ impl HarnessBackend for PBTHarnessBackend {
         let function_arg_struct = format_ident!("Args{}", fn_name.to_ident());
 
         // If a precondition is provided, add assume statements before function call
-        let precondition = self.use_preconditions.then(|| {
-            precondition.map(|pre| {
-                let check_fn_name = pre.check_name();
-                quote! {
-                    prop_assume!(#check_fn_name(#(function_arg_struct.#function_args),*));
-                }
+        let precondition = self
+            .use_preconditions
+            .then(|| {
+                precondition.map(|pre| {
+                    let check_fn_name = pre.checker_name();
+                    quote! {
+                        prop_assume!(#check_fn_name(#(function_arg_struct.#function_args),*));
+                    }
+                })
             })
-        });
+            .flatten();
+        // Error report message
+        let err_report = quote! {
+            println!("MISMATCH {}", #fn_name_string);
+            println!("function: {:?}", function_arg_struct);
+        };
+        // Return value check code
+        let retv_check = quote! {
+            if r1 != r2 {
+                #err_report
+                assert!(false);
+            }
+        };
 
         quote! {
             #[test]
@@ -73,12 +88,7 @@ impl HarnessBackend for PBTHarnessBackend {
                 }))
                 .map_err(|_| ());
 
-                if r1 != r2 {
-                    println!("MISMATCH {}", #fn_name_string);
-                    println!("function: {:?}", function_arg_struct);
-                    println!("r1 = {:?}, r2 = {:?}", r1, r2);
-                }
-                assert!(r1 == r2);
+                #retv_check
             }
         }
     }
@@ -104,13 +114,29 @@ impl HarnessBackend for PBTHarnessBackend {
         // Constructor argument struct name
         let constructor_arg_struct = format_ident!("Args{}", constr_name.to_ident());
 
+        // If a precondition is provided, add assume statements before method call
+        let precondition = self.use_preconditions.then(|| {
+            precondition.map(|pre| {
+                let check_fn_name = pre.checker_name();
+                quote! {
+                    prop_assume!(s2.#check_fn_name(#(method_arg_struct.#method_args),*));
+                }
+            })
+        });
+
         // Error report message
         let err_report = quote! {
             println!("MISMATCH: {}", #fn_name_string);
             println!("contructor: {:?}", constr_arg_struct);
             println!("method: {:?}", method_arg_struct);
         };
-
+        // Return value check code
+        let retv_check = quote! {
+            if r1 != r2 {
+                #err_report
+                assert!(false);
+            }
+        };
         // If a getter is provided, generate state check code after method call
         let state_check = getter.map(|getter| {
             let getter = &getter.metadata.signature.0.ident;
@@ -120,16 +146,6 @@ impl HarnessBackend for PBTHarnessBackend {
                     assert!(false);
                 }
             }
-        });
-
-        // If a precondition is provided, add assume statements before method call
-        let precondition = self.use_preconditions.then(|| {
-            precondition.map(|pre| {
-                let check_fn_name = pre.check_name();
-                quote! {
-                    prop_assume!(s2.#check_fn_name(#(method_arg_struct.#method_args),*));
-                }
-            })
         });
 
         quote! {
@@ -169,10 +185,7 @@ impl HarnessBackend for PBTHarnessBackend {
                 }))
                 .map_err(|_| ());
 
-                if r1 != r2 {
-                    #err_report
-                    assert!(false);
-                }
+                #retv_check
                 #state_check
             }
         }
@@ -252,7 +265,6 @@ impl PropertyBasedTesting {
         &self,
         checker: &Checker,
         harness: TokenStream,
-        harness_path: &str,
     ) -> anyhow::Result<()> {
         let toml = r#"
 [package]
@@ -265,7 +277,7 @@ proptest = "1.9"
 proptest-derive = "0.2.0"
 "#;
         create_harness_project(
-            harness_path,
+            &self.config.harness_path,
             &checker.src1.content,
             &checker.src2.content,
             &harness.to_string(),
@@ -275,13 +287,18 @@ proptest-derive = "0.2.0"
     }
 
     /// Run libAFL fuzzer and save the ouput in "df.tmp".
-    fn run_test(&self, harness_path: &str, output_path: &str) -> anyhow::Result<()> {
-        run_command("cargo", &["test"], Some(output_path), Some(harness_path))?;
+    fn run_test(&self) -> anyhow::Result<()> {
+        run_command(
+            "cargo",
+            &["test"],
+            Some(&self.config.output_path),
+            Some(&self.config.harness_path),
+        )?;
         Ok(())
     }
 
     /// Analyze the fuzzer output and return the functions that are not checked.
-    fn analyze_pbt_output(&self, functions: &[Path], output_path: &str) -> CheckResult {
+    fn analyze_pbt_output(&self, functions: &[Path]) -> CheckResult {
         let mut res = CheckResult {
             status: Ok(()),
             ok: functions.to_vec(),
@@ -289,7 +306,7 @@ proptest-derive = "0.2.0"
         };
 
         let re = Regex::new(r"MISMATCH:\s*(\S+)").unwrap();
-        let file = std::fs::File::open(output_path).unwrap();
+        let file = std::fs::File::open(&self.config.output_path).unwrap();
         let reader = BufReader::new(file);
 
         for line in reader.lines() {
@@ -333,18 +350,16 @@ impl Component for PropertyBasedTesting {
 
     fn run(&self, checker: &Checker) -> CheckResult {
         let (functions, harness) = self.generate_harness_file(checker);
-
-        let res = self.create_harness_project(checker, harness, &self.config.harness_path);
+        let res = self.create_harness_project(checker, harness);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
 
-        let output_path = &self.config.output_path;
-        let res = self.run_test(&self.config.harness_path, output_path);
+        let res = self.run_test();
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
-        let check_res = self.analyze_pbt_output(&functions, output_path);
+        let check_res = self.analyze_pbt_output(&functions);
 
         if !self.config.keep_harness {
             if let Err(e) = self.remove_harness_project() {

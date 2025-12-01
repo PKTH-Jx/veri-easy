@@ -43,14 +43,17 @@ impl HarnessBackend for KaniHarnessBackend {
         let function_arg_struct = format_ident!("Args{}", fn_name.to_ident());
 
         // If precondition is present, we may need to add assume code
-        let precondition = self.use_preconditions.then(|| {
-            precondition.map(|pre| {
-                let check_fn_name = pre.check_name();
-                quote! {
-                    kani::assume(#check_fn_name(#(function_arg_struct.#function_args),*));
-                }
+        let precondition = self
+            .use_preconditions
+            .then(|| {
+                precondition.map(|pre| {
+                    let check_fn_name = pre.checker_name();
+                    quote! {
+                        kani::assume(#check_fn_name(#(function_arg_struct.#function_args),*));
+                    }
+                })
             })
-        });
+            .flatten();
         // If loop unwind is specified, add unwind attribute
         let unwind_attr = self.loop_unwind.map(|unwind| {
             let unwind = TokenStream::from_str(&unwind.to_string()).unwrap();
@@ -105,14 +108,17 @@ impl HarnessBackend for KaniHarnessBackend {
         });
 
         // If precondition is present, we may need to add assume code
-        let precondition = self.use_preconditions.then(|| {
-            precondition.map(|pre| {
-                let check_fn_name = pre.check_name();
-                quote! {
-                    kani::assume(s2.#check_fn_name(#(method_arg_struct.#method_args),*));
-                }
+        let precondition = self
+            .use_preconditions
+            .then(|| {
+                precondition.map(|pre| {
+                    let check_fn_name = pre.checker_name();
+                    quote! {
+                        kani::assume(s2.#check_fn_name(#(method_arg_struct.#method_args),*));
+                    }
+                })
             })
-        });
+            .flatten();
         // If loop unwind is specified, add unwind attribute
         let unwind_attr = self.loop_unwind.map(|unwind| {
             let unwind = TokenStream::from_str(&unwind.to_string()).unwrap();
@@ -201,7 +207,6 @@ impl Kani {
         &self,
         checker: &Checker,
         harness: TokenStream,
-        harness_path: &str,
     ) -> anyhow::Result<()> {
         let toml = r#"
 [package]
@@ -213,7 +218,7 @@ edition = "2024"
 kani = "*"
 "#;
         create_harness_project(
-            harness_path,
+            &self.config.harness_path,
             &checker.src1.content,
             &checker.src2.content,
             &harness.to_string(),
@@ -223,7 +228,7 @@ kani = "*"
     }
 
     /// Run Kani and save the output.
-    fn run_kani(&self, harness_path: &str, output_path: &str) -> anyhow::Result<()> {
+    fn run_kani(&self) -> anyhow::Result<()> {
         let timeout_secs = self.config.timeout_secs;
         let status = run_command(
             "cargo",
@@ -234,8 +239,8 @@ kani = "*"
                 "--harness-timeout",
                 &format!("{}s", timeout_secs),
             ],
-            Some(output_path),
-            Some(harness_path),
+            Some(&self.config.output_path),
+            Some(&self.config.harness_path),
         )?;
 
         if status.code() == Some(101) {
@@ -245,7 +250,7 @@ kani = "*"
     }
 
     /// Analyze Kani output from "kani.tmp".
-    fn analyze_kani_output(&self, output_path: &str) -> CheckResult {
+    fn analyze_kani_output(&self) -> CheckResult {
         let mut res = CheckResult {
             status: Ok(()),
             ok: vec![],
@@ -253,7 +258,7 @@ kani = "*"
         };
 
         let re = Regex::new(r"Checking harness check_([0-9a-zA-Z_]+)\.").unwrap();
-        let file = std::fs::File::open(output_path).unwrap();
+        let file = std::fs::File::open(&self.config.output_path).unwrap();
         let reader = std::io::BufReader::new(file);
         let mut func_name: Option<String> = None;
 
@@ -301,18 +306,16 @@ impl Component for Kani {
     fn run(&self, checker: &Checker) -> CheckResult {
         if self.config.gen_harness {
             let harness = self.generate_harness(checker);
-            let res = self.create_harness_project(checker, harness, &self.config.harness_path);
+            let res = self.create_harness_project(checker, harness);
             if let Err(e) = res {
                 return CheckResult::failed(e);
             }
         }
-
-        let res = self.run_kani(&self.config.harness_path, &self.config.output_path);
+        let res = self.run_kani();
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
-        let check_res = self.analyze_kani_output(&self.config.output_path);
-
+        let check_res = self.analyze_kani_output();
         if !self.config.keep_harness {
             if let Err(e) = self.remove_harness_project() {
                 return CheckResult::failed(e);

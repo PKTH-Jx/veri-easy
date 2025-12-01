@@ -92,27 +92,30 @@ impl Default for Alive2Config {
 pub struct DiffFuzzConfig {
     /// Fuzzing harness path.
     pub harness_path: String,
-    /// Fuzzer path.
-    pub fuzzer_path: String,
     /// Fuzzing output path.
     pub output_path: String,
-    /// Iterations for fuzzing.
-    pub iterations: u32,
+    /// Executions for fuzzing.
+    pub executions: u32,
     /// Keep fuzzing harness project.
     pub keep_harness: bool,
     /// Keep fuzzing output file.
     pub keep_output: bool,
+    /// Use preconditions.
+    pub use_preconditions: bool,
+    /// Catch panic unwind.
+    pub catch_panic: bool,
 }
 
 impl Default for DiffFuzzConfig {
     fn default() -> Self {
         DiffFuzzConfig {
             harness_path: "df_harness".to_string(),
-            fuzzer_path: "df_fuzzer".to_string(),
             output_path: "df.tmp".to_string(),
-            iterations: 1000,
+            executions: 1000,
             keep_harness: false,
             keep_output: false,
+            use_preconditions: true,
+            catch_panic: true,
         }
     }
 }
@@ -192,7 +195,7 @@ impl WorkflowConfig {
                         config.pbt = Some(PBTConfig::default());
                     }
                 }
-                "difffuzz" => {
+                "difffuzz" | "diff-fuzz" | "diff_fuzz" => {
                     if config.diff_fuzz.is_none() {
                         log!(Brief, Warning, &msg("Differential Fuzzing"));
                         config.diff_fuzz = Some(DiffFuzzConfig::default());
@@ -254,9 +257,9 @@ impl WorkflowConfig {
                 "pbt" => components.push(Box::new(PropertyBasedTesting::new(
                     self.pbt.to_owned().unwrap(),
                 ))),
-                "difffuzz" => components.push(Box::new(DifferentialFuzzing::new(
-                    self.diff_fuzz.to_owned().unwrap(),
-                ))),
+                "difffuzz" | "diff-fuzz" | "diff_fuzz" => components.push(Box::new(
+                    DifferentialFuzzing::new(self.diff_fuzz.to_owned().unwrap()),
+                )),
                 "alive2" => components.push(Box::new(Alive2::new(self.alive2.to_owned().unwrap()))),
                 other => log!(
                     Brief,

@@ -65,6 +65,7 @@ pub struct CheckResult {
 }
 
 impl CheckResult {
+    /// Create a failed check result with the given error.
     pub fn failed(e: Error) -> Self {
         Self {
             status: Err(e),

@@ -1,9 +1,9 @@
-components = ["kani"]
+components = ["kani", "pbt", "difffuzz"]
 
 [kani]
 harness_path = "kani_harness"
 output_path = "kani.tmp"
-timeout_secs = 100
+timeout_secs = 1
 gen_harness = true
 keep_harness = true
 keep_output = true
@@ -16,17 +16,18 @@ output_path = "alive2.tmp"
 keep_output = false
 
 [diff_fuzz]
-harness_path = "/Users/jingx/Dev/os/verif/fuzz/harness"
-fuzzer_path = "/Users/jingx/Dev/os/verif/fuzz"
+harness_path = "df_harness"
 output_path = "df.tmp"
-iterations = 1000
+executions = 500000
 keep_harness = true
 keep_output = true
+catch_panic = true
+use_preconditions = false
 
 [pbt]
 harness_path = "pbt_harness"
 output_path = "pbt.tmp"
-test_cases = 30000
+test_cases = 50000
 keep_harness = true
-keep_output = false
-use_preconditions = true
+keep_output = true
+use_preconditions = false

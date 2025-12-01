@@ -160,13 +160,13 @@ impl Precondition {
     }
 
     /// The name of the check function.
-    pub fn check_name(&self) -> Path {
+    pub fn checker_name(&self) -> Path {
         if self.impl_type.is_some() {
             Path(vec![format!("verieasy_pre_{}", self.ident())])
         } else {
-            let mut check_name = self.name.clone();
-            *check_name.0.last_mut().unwrap() = format!("verieasy_pre_{}", self.ident());
-            check_name
+            let mut checker_name = self.name.clone();
+            *checker_name.0.last_mut().unwrap() = format!("verieasy_pre_{}", self.ident());
+            checker_name
         }
     }
 }

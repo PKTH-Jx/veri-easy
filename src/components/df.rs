@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use regex::Regex;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 
 use crate::{
     check::{CheckResult, Checker, Component},
@@ -15,7 +15,12 @@ use crate::{
 };
 
 /// Differential fuzzing harness generator backend.
-struct DFHarnessBackend;
+struct DFHarnessBackend {
+    /// Use preconditions.
+    use_preconditions: bool,
+    /// Catch panic unwind.
+    catch_panic: bool,
+}
 
 impl HarnessBackend for DFHarnessBackend {
     fn arg_struct_attrs(&self) -> TokenStream {
@@ -28,7 +33,7 @@ impl HarnessBackend for DFHarnessBackend {
         &self,
         function: &CommonFunction,
         function_args: &[TokenStream],
-        _precondition: Option<&Precondition>,
+        precondition: Option<&Precondition>,
     ) -> TokenStream {
         let fn_name = &function.metadata.name;
         let fn_name_string = fn_name.to_string();
@@ -38,30 +43,67 @@ impl HarnessBackend for DFHarnessBackend {
         // Function argument struct name
         let function_arg_struct = format_ident!("Args{}", fn_name.to_ident());
 
+        // If a precondition is provided, generate precondition check code before function call
+        let precondition = self
+            .use_preconditions
+            .then(|| {
+                precondition.map(|pre| {
+                    let check_fn_name = pre.checker_name();
+                    quote! {
+                        if !#check_fn_name(#(function_arg_struct.#function_args),*) {
+                            return true;
+                        }
+                    }
+                })
+            })
+            .flatten();
+        // Function call with panic catch if enabled
+        let fn_call = |mod_: TokenStream| {
+            if self.catch_panic {
+                quote! {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        #mod_::#fn_name(#(function_arg_struct.#function_args),*)
+                    }))
+                    .map_err(|_| ())
+                }
+            } else {
+                quote! {
+                    #mod_::#fn_name(#(function_arg_struct.#function_args),*)
+                }
+            }
+        };
+        let r1_call = fn_call(quote! {mod1});
+        let r2_call = fn_call(quote! {mod2});
+
+        // Error report message
+        let err_report = quote! {
+            outputln!("MISMATCH: {}", #fn_name_string);
+            outputln!("function: {:?}", function_arg_struct);
+        };
+        // Return value check code
+        let retv_check = quote! {
+            if r1 != r2 {
+                #err_report
+                return false;
+            }
+        };
+
         quote! {
+            #[inline(always)]
             fn #test_fn_name(input: &[u8]) -> bool {
                 // Function arguments
                 let function_arg_struct = match postcard::from_bytes::<#function_arg_struct>(&input[..]) {
                     Ok(args) => args,
                     Err(_) => return true,
                 };
+                // Precondition check
+                #precondition
+                // Do function call
+                let r1 = #r1_call;
+                let r2 = #r2_call;
 
-                // Function call
-                let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    mod1::#fn_name(#(function_arg_struct.#function_args),*)
-                }))
-                .map_err(|_| ());
-                let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    mod2::#fn_name(#(function_arg_struct.#function_args),*)
-                }))
-                .map_err(|_| ());
-
-                if r1 != r2 {
-                    println!("MISMATCH {}", #fn_name_string);
-                    println!("function: {:?}", function_arg_struct);
-                    println!("r1 = {:?}, r2 = {:?}", r1, r2);
-                }
-                r1 == r2
+                #retv_check
+                true
             }
         }
     }
@@ -74,7 +116,7 @@ impl HarnessBackend for DFHarnessBackend {
         method_args: &[TokenStream],
         constructor_args: &[TokenStream],
         receiver_prefix: TokenStream,
-        _precondition: Option<&Precondition>,
+        precondition: Option<&Precondition>,
     ) -> TokenStream {
         let fn_name = &method.metadata.name;
         let fn_name_string = fn_name.to_string();
@@ -87,13 +129,74 @@ impl HarnessBackend for DFHarnessBackend {
         // Constructor argument struct name
         let constructor_arg_struct = format_ident!("Args{}", constr_name.to_ident());
 
+        // If a precondition is provided, generate precondition check code before method call
+        let precondition = self
+            .use_preconditions
+            .then(|| {
+                precondition.map(|pre| {
+                    let check_fn_name = pre.checker_name();
+                    quote! {
+                        if !s2.#check_fn_name(#(method_arg_struct.#method_args),*) {
+                            return true;
+                        }
+                    }
+                })
+            })
+            .flatten();
+        // Constructor call with panic catch if enabled
+        let constr_call = |mod_: TokenStream| {
+            if self.catch_panic {
+                quote! {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        #mod_::#constr_name(#(constr_arg_struct.#constructor_args),*)
+                    })) {
+                        Ok(s) => s,
+                        Err(_) => return true,
+                    }
+                }
+            } else {
+                quote! {
+                    #mod_::#constr_name(#(constr_arg_struct.#constructor_args),*)
+                }
+            }
+        };
+        let s1_construct = constr_call(quote! {mod1});
+        let s2_construct = constr_call(quote! {mod2});
+        // Method call with panic catch if enabled
+        let method_call = |mod_: TokenStream, s: TokenStream| {
+            if self.catch_panic {
+                quote! {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        #mod_::#fn_name(
+                            #receiver_prefix #s, #(method_arg_struct.#method_args),*
+                        )
+                    }))
+                    .map_err(|_| ())
+                }
+            } else {
+                quote! {
+                    #mod_::#fn_name(
+                        #receiver_prefix #s, #(method_arg_struct.#method_args),*
+                    )
+                }
+            }
+        };
+        let r1_call = method_call(quote! {mod1}, quote! {s1});
+        let r2_call = method_call(quote! {mod2}, quote! {s2});
+
         // Error report message
         let err_report = quote! {
-            println!("MISMATCH: {}", #fn_name_string);
-            println!("contructor: {:?}", constr_arg_struct);
-            println!("method: {:?}", method_arg_struct);
+            outputln!("MISMATCH: {}", #fn_name_string);
+            outputln!("contructor: {:?}", constr_arg_struct);
+            outputln!("method: {:?}", method_arg_struct);
         };
-
+        // Return value check code
+        let retv_check = quote! {
+            if r1 != r2 {
+                #err_report
+                return false;
+            }
+        };
         // If a getter is provided, generate state check code after method call
         let state_check = getter.map(|getter| {
             let getter = &getter.metadata.signature.0.ident;
@@ -106,6 +209,7 @@ impl HarnessBackend for DFHarnessBackend {
         });
 
         quote! {
+            #[inline(always)]
             fn #test_fn_name(input: &[u8]) -> bool {
                 // Constructor arguments
                 let (constr_arg_struct, remain) = match postcard::take_from_bytes::<#constructor_arg_struct>(
@@ -121,39 +225,16 @@ impl HarnessBackend for DFHarnessBackend {
                 };
 
                 // Construct s1 and s2
-                let mut s1 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    mod1::#constr_name(#(constr_arg_struct.#constructor_args),*)
-                })) {
-                    Ok(s) => s,
-                    Err(_) => return true,
-                };
-                let mut s2 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    mod2::#constr_name(#(constr_arg_struct.#constructor_args),*)
-                })) {
-                    Ok(s) => s,
-                    Err(_) => return true,
-                };
-
+                let mut s1 = #s1_construct;
+                let mut s2 = #s2_construct;
+                // Precondition check
+                #precondition
                 // Do method call
-                let r1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    mod1::#fn_name(
-                        #receiver_prefix s1, #(method_arg_struct.#method_args),*
-                    )
-                }))
-                .map_err(|_| ());
-                let r2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    mod2::#fn_name(
-                        #receiver_prefix s2, #(method_arg_struct.#method_args),*
-                    )
-                }))
-                .map_err(|_| ());
+                let r1 = #r1_call;
+                let r2 = #r2_call;
 
-                if r1 != r2 {
-                    #err_report
-                    return false;
-                }
+                #retv_check
                 #state_check
-
                 true
             }
         }
@@ -182,7 +263,7 @@ impl HarnessBackend for DFHarnessBackend {
             }
         });
         quote! {
-            pub fn run_harness(input: &[u8]) -> bool {
+            fn run_harness(input: &[u8]) -> bool {
                 if input.len() == 0 {
                     return true;
                 }
@@ -209,12 +290,35 @@ impl HarnessBackend for DFHarnessBackend {
             #![allow(non_camel_case_types)]
             mod mod1;
             mod mod2;
-
             #(#imports)*
+
+            macro_rules! outputln {
+                ($($arg:tt)*) => {
+                    writeln!(get_harness_output(), $($arg)*).unwrap();
+                };
+            }
             #(#args_structs)*
             #(#functions)*
             #(#methods)*
             #additional
+
+            // Harness logging utils
+            use std::io::Write;
+            static HARNESS_OUTPUT: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+            fn init_harness_output() {
+                HARNESS_OUTPUT.set(std::fs::File::create("harness_output.log").unwrap()).unwrap();
+            }
+            fn get_harness_output() -> &'static std::fs::File {
+                HARNESS_OUTPUT.get().expect("not initialized")
+            }
+            fn main() {
+                init_harness_output();
+                afl::fuzz_nohook!(|data: &[u8]| {
+                    if !run_harness(data) {
+                        panic!("Harness reported failure for input: {:?}", data);
+                    }
+                });
+            }
         }
     }
 }
@@ -234,7 +338,13 @@ impl DifferentialFuzzing {
     }
 
     fn generate_harness_file(&self, checker: &Checker) -> (Vec<Path>, TokenStream) {
-        let generator = DFHarnessGenerator::new(checker, DFHarnessBackend);
+        let generator = DFHarnessGenerator::new(
+            checker,
+            DFHarnessBackend {
+                use_preconditions: self.config.use_preconditions,
+                catch_panic: self.config.catch_panic,
+            },
+        );
         // Collect functions and methods that are checked in harness
         let functions = generator
             .collection
@@ -258,7 +368,6 @@ impl DifferentialFuzzing {
         &self,
         checker: &Checker,
         harness: TokenStream,
-        harness_path: &str,
     ) -> anyhow::Result<()> {
         let toml = r#"
 [package]
@@ -269,34 +378,70 @@ edition = "2024"
 [dependencies]
 serde = "*"
 postcard = "*"
+afl = "*"
 "#;
         create_harness_project(
-            harness_path,
+            &self.config.harness_path,
             &checker.src1.content,
             &checker.src2.content,
             &harness.to_string(),
             toml,
-            true,
+            false,
         )
     }
 
-    /// Run libAFL fuzzer and save the ouput in "df.tmp".
-    fn run_fuzzer(&self, fuzzer_path: &str, output_path: &str) -> anyhow::Result<()> {
-        let status = run_command(
-            "cargo",
-            &["run", "--release"],
-            Some(output_path),
-            Some(fuzzer_path),
-        )?;
+    /// Prepare initial inputs for the fuzzer.
+    fn prepare_initial_inputs(&self) -> anyhow::Result<()> {
+        let inputs_dir = format!("{}/in", &self.config.harness_path);
+        std::fs::create_dir_all(&inputs_dir)
+            .map_err(|_| anyhow!("Failed to create inputs directory"))?;
 
-        if status.code() == Some(101) {
+        let mut file = std::fs::File::create(format!("{}/input1", inputs_dir))
+            .map_err(|_| anyhow!("Failed to create initial input file"))?;
+        file.write_all(&[12, 34, 56, 78])
+            .map_err(|_| anyhow!("Failed to write initial input file"))?;
+        Ok(())
+    }
+
+    /// Run the fuzzer on the harness project.
+    fn run_fuzzer(&self) -> anyhow::Result<()> {
+        let build_status = run_command(
+            "cargo",
+            &["afl", "build", "--release"],
+            None,
+            Some(&self.config.harness_path),
+        )?;
+        if build_status.code() == Some(101) {
             return Err(anyhow!("Command failed due to compilation error"));
         }
+
+        let _fuzz_status = run_command(
+            "cargo",
+            &[
+                "afl",
+                "fuzz",
+                "-i",
+                "in",
+                "-o",
+                "out",
+                "-E",
+                self.config.executions.to_string().as_str(),
+                "target/release/harness",
+            ],
+            None,
+            Some(&self.config.harness_path),
+        )?;
+        std::fs::copy(
+            format!("{}/harness_output.log", self.config.harness_path),
+            &self.config.output_path,
+        )
+        .map_err(|e| anyhow!("Failed to copy harness output log: {}", e))?;
+
         Ok(())
     }
 
     /// Analyze the fuzzer output and return the functions that are not checked.
-    fn analyze_fuzzer_output(&self, functions: &[Path], output_path: &str) -> CheckResult {
+    fn analyze_fuzzer_output(&self, functions: &[Path]) -> CheckResult {
         let mut res = CheckResult {
             status: Ok(()),
             ok: functions.to_vec(),
@@ -304,7 +449,7 @@ postcard = "*"
         };
 
         let re = Regex::new(r"MISMATCH:\s*(\S+)").unwrap();
-        let file = std::fs::File::open(output_path).unwrap();
+        let file = std::fs::File::open(&self.config.output_path).unwrap();
         let reader = BufReader::new(file);
 
         for line in reader.lines() {
@@ -348,17 +493,20 @@ impl Component for DifferentialFuzzing {
 
     fn run(&self, checker: &Checker) -> CheckResult {
         let (functions, harness) = self.generate_harness_file(checker);
-
-        let res = self.create_harness_project(checker, harness, &self.config.harness_path);
+        let res = self.create_harness_project(checker, harness);
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
 
-        let res = self.run_fuzzer(&self.config.fuzzer_path, &self.config.output_path);
+        let res = self.prepare_initial_inputs();
         if let Err(e) = res {
             return CheckResult::failed(e);
         }
-        let check_res = self.analyze_fuzzer_output(&functions, &self.config.output_path);
+        let res = self.run_fuzzer();
+        if let Err(e) = res {
+            return CheckResult::failed(e);
+        }
+        let check_res = self.analyze_fuzzer_output(&functions);
 
         if !self.config.keep_harness {
             if let Err(e) = self.remove_harness_project() {
