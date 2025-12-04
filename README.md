@@ -1,3 +1,5 @@
+**This repositoty has been moved to [syswonder/Veri-easy](https://github.com/syswonder/Veri-easy).**
+
 # Veri-easy
 
 Veri-easy is a lightweight and automated framework that combines multiple formal and testing techniques to establish functional equivalence between the verified and original implementations. It automates function collection, harness generation, integrates with Kani model checking, property-based testing (Proptest), and differential fuzzing, and can optionally invoke Alive2 for IR-level validation.
